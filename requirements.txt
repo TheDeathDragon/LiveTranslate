@@ -1,0 +1,34 @@
+# Core dependencies
+numpy>=1.24.0
+PyYAML>=6.0
+httpx>=0.28.0
+openai>=1.0.0
+psutil>=5.9.0
+
+# Audio capture (Windows WASAPI loopback)
+PyAudioWPatch>=0.2.12
+
+# ASR engines
+faster-whisper>=1.0.0
+editdistance-s>=1.0.0
+omegaconf>=2.3.0
+kaldiio>=2.18.0
+torch-complex>=0.4.0
+soundfile>=0.12.0
+librosa>=0.10.0
+jaconv>=0.3.0
+jamo>=0.4.1
+hydra-core>=1.3.0
+six>=1.16.0
+sentencepiece>=0.2.0
+transformers>=4.40.0
+
+# Model hubs
+modelscope>=1.20.0
+huggingface_hub>=0.20.0
+
+# UI
+PyQt6>=6.5.0
+
+# torch & torchaudio - install separately with CUDA support:
+#   pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu126

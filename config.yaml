@@ -1,0 +1,78 @@
+# LiveTrans Configuration
+
+audio:
+  # WASAPI loopback device name (null = default output device)
+  device: null
+  # Sample rate for capture
+  sample_rate: 16000
+  # Audio chunk duration in seconds for VAD processing (32ms = Silero VAD native window)
+  chunk_duration: 0.032
+
+asr:
+  # Model size: tiny, base, small, medium, large-v3
+  model_size: "medium"
+  # Device: cuda or cpu
+  device: "cuda"
+  # Compute type: float16, int8_float16, int8
+  compute_type: "float16"
+  # Language: auto, en, ja, zh, ko, etc.
+  language: "auto"
+  # Minimum speech duration (seconds) before sending to ASR
+  min_speech_duration: 1.0
+  # Maximum speech duration (seconds) before forced segmentation
+  max_speech_duration: 8.0
+  # VAD threshold (0.0 - 1.0)
+  vad_threshold: 0.3
+
+translation:
+  # OpenAI-compatible API settings
+  api_base: "https://api.openai.com/v1"
+  api_key: "your-api-key-here"
+  model: "gpt-4o-mini"
+  # Target language for translation
+  target_language: "zh"
+  # Source language hint (auto = detect from ASR)
+  source_language: "auto"
+  # Context window size (number of recent translations to include)
+  context_window: 10
+  # Max tokens for translation response
+  max_tokens: 256
+  # Temperature
+  temperature: 0.3
+  # Enable streaming output
+  streaming: true
+  # System prompt template ({source_lang}, {target_lang}, {context} will be replaced)
+  system_prompt: |
+    你是一个专业的影视字幕翻译专家。请将以下{source_lang}对话翻译为{target_lang}。
+    要求：
+    1. 保持口语化，符合目标语言观众的表达习惯
+    2. 简洁明了，每句翻译不超过原文两行
+    3. 如果语句不完整，结合上下文补全含义
+    4. 不要添加解释或注释，只输出翻译结果
+
+    近期对话上下文：
+    {context}
+
+subtitle:
+  # Font family
+  font_family: "Microsoft YaHei"
+  # Font size
+  font_size: 28
+  # Font color (hex)
+  font_color: "#FFFFFF"
+  # Outline color
+  outline_color: "#000000"
+  # Outline width
+  outline_width: 2
+  # Subtitle position from bottom (pixels)
+  bottom_margin: 80
+  # Show original text above translation
+  show_original: true
+  # Original text font size
+  original_font_size: 20
+  # Original text color
+  original_color: "#CCCCCC"
+  # Subtitle display duration (seconds)
+  display_duration: 5.0
+  # Window opacity (0.0 - 1.0)
+  opacity: 0.95

@@ -1,0 +1,125 @@
+# LiveTrans English UI strings
+
+# Overlay
+translating: "translating..."
+same_language: "(same language)"
+copy_original: "Copy Original"
+copy_translation: "Copy Translation"
+copy_all: "Copy All"
+paused: "Paused"
+running: "Running"
+clear: "Clear"
+settings: "Settings"
+monitor: "Monitor"
+quit: "Quit"
+click_through: "Click-through"
+top_most: "Top-most"
+auto_scroll: "Auto-scroll"
+model_label: "Model:"
+target_label: "Target:"
+
+# Control Panel
+window_control_panel: "LiveTrans - Control Panel"
+tab_vad_asr: "VAD / ASR"
+tab_translation: "Translation"
+tab_benchmark: "Benchmark"
+tab_cache: "Cache"
+
+# VAD / ASR tab
+group_asr_engine: "ASR Engine"
+label_engine: "Engine:"
+label_language_hint: "Language Hint:"
+label_device: "Device:"
+label_audio: "Audio:"
+label_hub: "Hub:"
+system_default: "System Default"
+hub_modelscope: "ModelScope (China)"
+hub_huggingface: "HuggingFace (Intl)"
+label_ui_lang: "Language:"
+group_vad_mode: "VAD Mode"
+vad_silero: "Silero VAD"
+vad_energy: "Energy-based"
+vad_disabled: "Disabled (always send)"
+group_silero_threshold: "Silero VAD Threshold"
+label_threshold: "Threshold:"
+group_energy_threshold: "Energy Threshold (for Energy-based mode)"
+group_timing: "Timing"
+label_min_speech: "Min speech:"
+label_max_speech: "Max speech:"
+label_silence: "Silence:"
+label_silence_dur: "Silence dur:"
+silence_auto: "Auto"
+silence_fixed: "Fixed"
+
+# Translation tab
+group_active_model: "Active Model (used in pipeline)"
+btn_apply: "Apply"
+group_model_configs: "Model Configurations"
+btn_add: "Add"
+btn_edit: "Edit"
+btn_duplicate: "Duplicate"
+btn_remove: "Remove"
+group_system_prompt: "System Prompt (supports {source_lang} {target_lang})"
+btn_restore_default: "Restore Default"
+btn_apply_prompt: "Apply Prompt"
+group_timeout: "Model Connect Timeout"
+
+# Benchmark tab
+label_source: "Source:"
+btn_test_all: "Test All Models"
+testing: "Testing..."
+
+# Cache tab
+btn_open_folder: "Open Folder"
+btn_delete_all_exit: "Delete All && Exit"
+scanning: "Scanning..."
+no_cached_models: "No cached models found"
+cache_total: "Total: {size}  ({count} items)"
+dialog_delete_title: "Delete All Models & Exit"
+dialog_delete_msg: >-
+  This will delete all {count} cached models ({size})
+  and exit the application.
+
+  Settings will be preserved. Required models will be
+  re-downloaded on next launch.
+
+  Continue?
+
+# Dialogs
+window_setup: "LiveTrans - Initial Setup"
+group_download_source: "Model Download Source"
+hub_modelscope_full: "ModelScope (China)"
+hub_huggingface_full: "HuggingFace (International)"
+btn_start_download: "Start Download"
+btn_retry: "Retry"
+download_failed: "Download failed: {error}"
+download_complete: "Download complete!"
+window_download: "LiveTrans - Download Models"
+downloading_models: "Downloading required models: {names}"
+btn_close: "Close"
+dialog_edit_model: "Edit Model"
+dialog_add_model: "Add Model"
+label_display_name: "Display Name:"
+label_api_base: "API Base:"
+label_api_key: "API Key:"
+label_model: "Model:"
+label_proxy: "Proxy:"
+label_proxy_url: "Proxy URL:"
+proxy_none: "No Proxy"
+proxy_system: "System Proxy"
+proxy_custom: "Custom Proxy"
+no_system_role: "No system role (merge into user message)"
+loading_model: "Loading {name}...\nPlease wait."
+error_title: "Error"
+error_load_asr: "Failed to load ASR model:\n{error}"
+
+# Log Window
+window_log: "LiveTrans - Log"
+show_debug: "Show DEBUG"
+
+# System Tray
+tray_tooltip: "LiveTrans - Real-time Translation"
+tray_start: "Start"
+tray_stop: "Stop"
+tray_show_log: "Show Log"
+tray_show_panel: "Show Panel"

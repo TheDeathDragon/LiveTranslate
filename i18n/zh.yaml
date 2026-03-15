@@ -1,0 +1,124 @@
+# LiveTrans 中文 UI 字符串
+
+# 悬浮窗
+translating: "翻译中..."
+same_language: "(相同语言)"
+copy_original: "复制原文"
+copy_translation: "复制译文"
+copy_all: "复制全部"
+paused: "已暂停"
+running: "运行中"
+clear: "清除"
+settings: "设置"
+monitor: "监控"
+quit: "退出"
+click_through: "鼠标穿透"
+top_most: "始终置顶"
+auto_scroll: "自动滚动"
+model_label: "模型:"
+target_label: "目标:"
+
+# 控制面板
+window_control_panel: "LiveTrans - 控制面板"
+tab_vad_asr: "VAD / ASR"
+tab_translation: "翻译"
+tab_benchmark: "基准测试"
+tab_cache: "缓存"
+
+# VAD / ASR 标签页
+group_asr_engine: "ASR 引擎"
+label_engine: "引擎:"
+label_language_hint: "语言提示:"
+label_device: "设备:"
+label_audio: "音频:"
+label_hub: "下载源:"
+system_default: "系统默认"
+hub_modelscope: "ModelScope (国内)"
+hub_huggingface: "HuggingFace (国际)"
+label_ui_lang: "界面语言:"
+group_vad_mode: "VAD 模式"
+vad_silero: "Silero VAD"
+vad_energy: "能量检测"
+vad_disabled: "禁用 (始终发送)"
+group_silero_threshold: "Silero VAD 阈值"
+label_threshold: "阈值:"
+group_energy_threshold: "能量阈值 (用于能量检测模式)"
+group_timing: "时间参数"
+label_min_speech: "最短语音:"
+label_max_speech: "最长语音:"
+label_silence: "静音模式:"
+label_silence_dur: "静音时长:"
+silence_auto: "自动"
+silence_fixed: "固定"
+
+# 翻译标签页
+group_active_model: "当前模型 (用于翻译管线)"
+btn_apply: "应用"
+group_model_configs: "模型配置"
+btn_add: "添加"
+btn_edit: "编辑"
+btn_duplicate: "复制"
+btn_remove: "删除"
+group_system_prompt: "系统提示词 (支持 {source_lang} {target_lang})"
+btn_restore_default: "恢复默认"
+btn_apply_prompt: "应用提示词"
+group_timeout: "模型连接超时"
+
+# 基准测试标签页
+label_source: "源语言:"
+btn_test_all: "测试全部模型"
+testing: "测试中..."
+
+# 缓存标签页
+btn_open_folder: "打开文件夹"
+btn_delete_all_exit: "删除全部并退出"
+scanning: "扫描中..."
+no_cached_models: "未找到缓存模型"
+cache_total: "总计: {size}  ({count} 项)"
+dialog_delete_title: "删除全部模型并退出"
+dialog_delete_msg: >-
+  将删除全部 {count} 个缓存模型 ({size})
+  并退出应用程序。
+
+  设置将被保留，所需模型将在下次启动时重新下载。
+
+  是否继续？
+
+# 对话框
+window_setup: "LiveTrans - 初始设置"
+group_download_source: "模型下载源"
+hub_modelscope_full: "ModelScope (国内)"
+hub_huggingface_full: "HuggingFace (国际)"
+btn_start_download: "开始下载"
+btn_retry: "重试"
+download_failed: "下载失败: {error}"
+download_complete: "下载完成！"
+window_download: "LiveTrans - 下载模型"
+downloading_models: "正在下载所需模型: {names}"
+btn_close: "关闭"
+dialog_edit_model: "编辑模型"
+dialog_add_model: "添加模型"
+label_display_name: "显示名称:"
+label_api_base: "API 地址:"
+label_api_key: "API 密钥:"
+label_model: "模型:"
+label_proxy: "代理:"
+label_proxy_url: "代理地址:"
+proxy_none: "不使用代理"
+proxy_system: "系统代理"
+proxy_custom: "自定义代理"
+no_system_role: "无 system 角色 (合并到 user 消息)"
+loading_model: "正在加载 {name}...\n请稍候。"
+error_title: "错误"
+error_load_asr: "ASR 模型加载失败:\n{error}"
+
+# 日志窗口
+window_log: "LiveTrans - 日志"
+show_debug: "显示 DEBUG"
+
+# 系统托盘
+tray_tooltip: "LiveTrans - 实时翻译"
+tray_start: "启动"
+tray_stop: "停止"
+tray_show_log: "显示日志"
+tray_show_panel: "显示面板"
