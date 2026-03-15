@@ -22,7 +22,7 @@ asr:
   # Maximum speech duration (seconds) before forced segmentation
   max_speech_duration: 8.0
   # VAD threshold (0.0 - 1.0)
-  vad_threshold: 0.3
+  vad_threshold: 0.5
 
 translation:
   # OpenAI-compatible API settings

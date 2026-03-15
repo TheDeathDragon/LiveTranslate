@@ -109,6 +109,14 @@ Key overlay features:
 - VAD progressive silence: buffer越长接受越短的停顿切分 (<3s=full, 3-6s=half, 6-10s=quarter of silence_limit)
 - VAD backtrack split: max duration时回溯confidence history找最低谷切分，remainder保留到下一段；三级策略（绝对低谷→相对低谷20%→低于均值兜底）
 - FunASR `disable_pbar=True` required in all `generate()` calls — tqdm crashes in GUI process when flushing stderr
+- ASR engine lifecycle: each engine exposes `unload()` (move to CPU + release) and `to_device(device)` (in-place migration). Device switching uses `to_device()` for PyTorch engines (SenseVoice/FunASR) and full reload for ctranslate2 (Whisper). Release order: `unload()` → `del` → `gc.collect()` → `torch.cuda.empty_cache()`
+- Whisper (ctranslate2) only accepts `device="cuda"` not `"cuda:0"`; device index passed via `device_index` param. Parsed from combo text like `"cuda:0 (RTX 4090)"` in `_switch_asr_engine`
+- VAD speech density filter: `_flush_segment()` discards segments where <25% of chunks are above confidence threshold (noise rejection)
+- ASR text density filter: segments ≥2s producing ≤3 alnum characters are discarded as noise
+- Settings file uses atomic write (write to `.tmp` then `os.replace`) to prevent corruption on crash
+- `stop()` joins pipeline thread before flushing VAD to prevent concurrent `_process_segment` calls
+- Cancelled ASR download/failed load restores `_asr_ready` if old engine is still available
+- `Translator._build_system_prompt` catches format errors in user prompt templates, falls back to DEFAULT_PROMPT
 
 ## Language & Style
 

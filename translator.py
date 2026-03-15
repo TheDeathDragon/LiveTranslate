@@ -76,10 +76,14 @@ class Translator:
     def _build_system_prompt(self, source_lang):
         src = LANGUAGE_DISPLAY.get(source_lang, source_lang)
         tgt = LANGUAGE_DISPLAY.get(self._target_language, self._target_language)
-        return self._system_prompt_template.format(
-            source_lang=src,
-            target_lang=tgt,
-        )
+        try:
+            return self._system_prompt_template.format(
+                source_lang=src,
+                target_lang=tgt,
+            )
+        except (KeyError, IndexError, ValueError) as e:
+            log.warning(f"Bad prompt template, falling back to default: {e}")
+            return DEFAULT_PROMPT.format(source_lang=src, target_lang=tgt)
 
     def _build_messages(self, system_prompt, text):
         if self._no_system_role:

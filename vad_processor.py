@@ -15,7 +15,7 @@ class VADProcessor:
     def __init__(
         self,
         sample_rate=16000,
-        threshold=0.5,
+        threshold=0.50,
         min_speech_duration=1.0,
         max_speech_duration=15.0,
         chunk_duration=0.032,
@@ -297,6 +297,19 @@ class VADProcessor:
     def _flush_segment(self):
         if not self._speech_buffer:
             return None
+        # Speech density check: discard segments where most chunks are below threshold
+        if len(self._confidence_history) >= 4:
+            effective_threshold = self.threshold if self.mode == "silero" else 0.5
+            voiced = sum(1 for c in self._confidence_history if c >= effective_threshold)
+            density = voiced / len(self._confidence_history)
+            if density < 0.25:
+                dur = self._speech_samples / self.sample_rate
+                log.debug(
+                    f"Low speech density {density:.0%} ({voiced}/{len(self._confidence_history)}), "
+                    f"discarding {dur:.1f}s segment"
+                )
+                self._reset()
+                return None
         segment = np.concatenate(self._speech_buffer)
         self._reset()
         return segment

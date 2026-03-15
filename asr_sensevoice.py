@@ -35,6 +35,18 @@ class SenseVoiceEngine:
         self.language = language if language != "auto" else None
         log.info(f"SenseVoice language: {old} -> {self.language}")
 
+    def to_device(self, device: str):
+        self._model.model.to(device)
+        log.info(f"SenseVoice moved to {device}")
+
+    def unload(self):
+        if hasattr(self, "_model") and self._model is not None:
+            try:
+                self._model.model.to("cpu")
+            except Exception:
+                pass
+            self._model = None
+
     def transcribe(self, audio: np.ndarray) -> dict | None:
         """Transcribe audio segment.
 

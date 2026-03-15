@@ -18,6 +18,7 @@ class ASREngine:
         self,
         model_size="medium",
         device="cuda",
+        device_index=0,
         compute_type="float16",
         language="auto",
         download_root=None,
@@ -26,6 +27,7 @@ class ASREngine:
         self._model = WhisperModel(
             model_size,
             device=device,
+            device_index=device_index,
             compute_type=compute_type,
             download_root=download_root,
         )
@@ -35,6 +37,18 @@ class ASREngine:
         old = self.language
         self.language = language if language != "auto" else None
         log.info(f"ASR language: {old} -> {self.language}")
+
+    def to_device(self, device: str):
+        # ctranslate2 doesn't support device migration; must reload
+        return False
+
+    def unload(self):
+        if self._model is not None:
+            try:
+                self._model.model.unload_model()
+            except Exception:
+                pass
+            self._model = None
 
     def transcribe(self, audio: np.ndarray) -> dict | None:
         """Transcribe audio segment.

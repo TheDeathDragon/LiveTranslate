@@ -156,11 +156,28 @@ class LiveTransApp:
             self._overlay.apply_style(settings["style"])
         if "asr_language" in settings and self._asr:
             self._asr.set_language(settings["asr_language"])
-        # ASR compute device change forces engine reload
+        # ASR compute device change: try in-place migration first
         new_device = settings.get("asr_device")
         if new_device and new_device != self._asr_device:
+            old_device = self._asr_device
             self._asr_device = new_device
-            self._asr_type = None  # force reload
+            if self._asr is not None and hasattr(self._asr, "to_device"):
+                result = self._asr.to_device(new_device)
+                if result is not False:
+                    log.info(f"ASR device migrated: {old_device} -> {new_device}")
+                    if self._overlay:
+                        display_name = ASR_DISPLAY_NAMES.get(self._asr_type, self._asr_type)
+                        self._overlay.update_asr_device(f"{display_name} [{new_device}]")
+                    import gc
+                    gc.collect()
+                    try:
+                        torch.cuda.empty_cache()
+                    except Exception:
+                        pass
+                else:
+                    self._asr_type = None  # ctranslate2: force reload
+            else:
+                self._asr_type = None  # no engine loaded: force reload
         if "asr_engine" in settings:
             self._switch_asr_engine(settings["asr_engine"])
         if "audio_device" in settings:
@@ -236,7 +253,23 @@ class LiveTransApp:
                 dlg = ModelDownloadDialog(missing, hub=hub, parent=parent)
                 if dlg.exec() != QDialog.DialogCode.Accepted:
                     log.info(f"Download cancelled/failed: {engine_type}")
+                    # Restore readiness if old engine is still available
+                    if self._asr is not None:
+                        self._asr_ready = True
                     return
+
+        # Release old engine BEFORE loading new one to free GPU memory
+        if self._asr is not None:
+            log.info(f"Releasing old ASR engine: {self._asr_type}")
+            if hasattr(self._asr, "unload"):
+                self._asr.unload()
+            self._asr = None
+            import gc
+            gc.collect()
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
 
         dlg = _ModelLoadDialog(
             t("loading_model").format(name=display_name), parent=parent
@@ -247,6 +280,14 @@ class LiveTransApp:
 
         def _load():
             try:
+                # Normalize "cuda:0 (RTX 4090)" → base="cuda", index=0
+                dev = device
+                dev_index = 0
+                if dev.startswith("cuda:"):
+                    part = dev.split("(")[0].strip()  # "cuda:0"
+                    dev_index = int(part.split(":")[1])
+                    dev = "cuda"
+
                 if engine_type == "sensevoice":
                     from asr_sensevoice import SenseVoiceEngine
 
@@ -261,7 +302,8 @@ class LiveTransApp:
                     download_root = str((MODELS_DIR / "huggingface" / "hub").resolve())
                     new_asr[0] = ASREngine(
                         model_size=model_size,
-                        device=device,
+                        device=dev,
+                        device_index=dev_index,
                         compute_type=self._config["asr"]["compute_type"],
                         language=self._config["asr"]["language"],
                         download_root=download_root,
@@ -291,6 +333,8 @@ class LiveTransApp:
             QMessageBox.warning(
                 parent, t("error_title"), t("error_load_asr").format(error=load_error[0])
             )
+            # Old engine was already released; mark ASR as unavailable
+            self._asr_type = None
             return
 
         self._asr = new_asr[0]
@@ -340,13 +384,15 @@ class LiveTransApp:
 
     def stop(self):
         self._running = False
-        # Flush remaining VAD buffer before stopping
+        self._audio.stop()
+        # Wait for pipeline thread to finish before flushing
+        if self._pipeline_thread:
+            self._pipeline_thread.join(timeout=3)
+            self._pipeline_thread = None
+        # Flush remaining VAD buffer after pipeline thread is done
         remaining = self._vad.flush()
         if remaining is not None and self._asr_ready:
             self._process_segment(remaining)
-        self._audio.stop()
-        if self._pipeline_thread:
-            self._pipeline_thread.join(timeout=3)
         self._tl_executor.shutdown(wait=False)
         log.info("Pipeline stopped")
 
@@ -379,6 +425,12 @@ class LiveTransApp:
         # Skip empty or punctuation-only ASR results
         if not original_text or not any(c.isalnum() for c in original_text):
             log.debug(f"ASR returned empty/punctuation-only, skipping: '{result['text']}'")
+            return
+
+        # Skip suspiciously short text from long segments (likely noise)
+        alnum_chars = sum(1 for c in original_text if c.isalnum())
+        if seg_len >= 2.0 and alnum_chars <= 3:
+            log.debug(f"Noise filter: {seg_len:.1f}s segment produced only '{original_text}', skipping")
             return
 
         self._asr_count += 1

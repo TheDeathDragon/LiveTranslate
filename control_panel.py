@@ -58,9 +58,11 @@ def _load_saved_settings() -> dict | None:
 
 def _save_settings(settings: dict):
     try:
-        SETTINGS_FILE.write_text(
+        tmp = SETTINGS_FILE.with_suffix(".tmp")
+        tmp.write_text(
             json.dumps(settings, indent=2, ensure_ascii=False), encoding="utf-8"
         )
+        tmp.replace(SETTINGS_FILE)
         log.info(f"Settings saved to {SETTINGS_FILE}")
     except Exception as e:
         log.warning(f"Failed to save settings: {e}")
@@ -259,7 +261,7 @@ class ControlPanel(QWidget):
         silero_layout = QGridLayout(silero_group)
         self._vad_threshold_slider = QSlider(Qt.Orientation.Horizontal)
         self._vad_threshold_slider.setRange(0, 100)
-        vad_pct = int(s.get("vad_threshold", 0.3) * 100)
+        vad_pct = int(s.get("vad_threshold", 0.5) * 100)
         self._vad_threshold_slider.setValue(vad_pct)
         self._vad_threshold_slider.valueChanged.connect(self._on_threshold_changed)
         self._vad_threshold_slider.sliderReleased.connect(self._auto_save)
@@ -945,15 +947,15 @@ class ControlPanel(QWidget):
         self._current_settings["vad_mode"] = modes[index]
 
     def _on_threshold_changed(self, value):
-        t = value / 100.0
-        self._current_settings["vad_threshold"] = t
+        val = value / 100.0
+        self._current_settings["vad_threshold"] = val
         self._vad_threshold_label.setText(f"{value}%")
         if not self._vad_threshold_slider.isSliderDown():
             self._auto_save()
 
     def _on_energy_changed(self, value):
-        t = value / 1000.0
-        self._current_settings["energy_threshold"] = t
+        val = value / 1000.0
+        self._current_settings["energy_threshold"] = val
         self._energy_label.setText(f"{value}\u2030")
         if not self._energy_slider.isSliderDown():
             self._auto_save()
