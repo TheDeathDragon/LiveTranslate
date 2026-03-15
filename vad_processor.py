@@ -41,6 +41,10 @@ class VADProcessor:
         self._is_speaking = False
         self._silence_counter = 0
 
+        # Pre-speech ring buffer: capture onset consonants before VAD triggers
+        self._pre_speech_chunks = 3  # ~96ms at 32ms/chunk
+        self._pre_buffer = collections.deque(maxlen=self._pre_speech_chunks)
+
         # Silence timing
         self._silence_mode = "auto"  # "auto" or "fixed"
         self._fixed_silence_dur = 0.8
@@ -107,15 +111,11 @@ class VADProcessor:
 
     def _silero_confidence(self, audio_chunk: np.ndarray) -> float:
         window_size = 512 if self.sample_rate == 16000 else 256
-        max_conf = 0.0
-        for start in range(0, len(audio_chunk), window_size):
-            window = audio_chunk[start : start + window_size]
-            if len(window) < window_size:
-                window = np.pad(window, (0, window_size - len(window)))
-            tensor = torch.from_numpy(window).float()
-            conf = self._model(tensor, self.sample_rate).item()
-            max_conf = max(max_conf, conf)
-        return max_conf
+        chunk = audio_chunk[:window_size]
+        if len(chunk) < window_size:
+            chunk = np.pad(chunk, (0, window_size - len(chunk)))
+        tensor = torch.from_numpy(chunk).float()
+        return self._model(tensor, self.sample_rate).item()
 
     def _energy_confidence(self, audio_chunk: np.ndarray) -> float:
         rms = float(np.sqrt(np.mean(audio_chunk**2)))
@@ -163,6 +163,15 @@ class VADProcessor:
                     if self._silence_mode == "auto":
                         self._update_adaptive_limit()
 
+            if not self._is_speaking:
+                # Speech onset: prepend pre-speech buffer to capture leading consonants
+                # Use threshold as confidence so these chunks don't create false valleys
+                for pre_chunk in self._pre_buffer:
+                    self._speech_buffer.append(pre_chunk)
+                    self._confidence_history.append(effective_threshold)
+                    self._speech_samples += len(pre_chunk)
+                self._pre_buffer.clear()
+
             self._is_speaking = True
             self._silence_counter = 0
             self._speech_buffer.append(audio_chunk)
@@ -173,6 +182,9 @@ class VADProcessor:
             self._speech_buffer.append(audio_chunk)
             self._confidence_history.append(confidence)
             self._speech_samples += len(audio_chunk)
+        else:
+            # Not speaking: feed pre-speech ring buffer
+            self._pre_buffer.append(audio_chunk)
 
         # Force segment if max duration reached — backtrack to find best split point
         if self._speech_samples >= self.max_speech_samples:
@@ -189,47 +201,54 @@ class VADProcessor:
         return None
 
     def _find_best_split_index(self) -> int:
-        """Find the best chunk index to split at by looking for a confidence
-        valley in the buffer. Uses relative dip detection so it works even
-        when the speaker never fully pauses (e.g. fast commentary).
+        """Find the best chunk index to split at using smoothed confidence.
+        A sliding window average reduces single-chunk noise, then we find
+        the center of the lowest valley. Works even when the speaker never
+        fully pauses (e.g. fast commentary).
         Returns -1 if no usable split point found."""
         n = len(self._confidence_history)
         if n < 4:
             return -1
 
+        # Smooth confidence with a sliding window (~160ms = 5 chunks at 32ms)
+        smooth_win = min(5, n // 2)
+        smoothed = []
+        for i in range(n):
+            lo = max(0, i - smooth_win // 2)
+            hi = min(n, i + smooth_win // 2 + 1)
+            smoothed.append(sum(self._confidence_history[lo:hi]) / (hi - lo))
+
         # Search in the latter 70% of the buffer (avoid splitting too early)
         search_start = max(1, n * 3 // 10)
 
-        # Pass 1: find global minimum in search range
-        min_conf = float("inf")
+        # Find global minimum in smoothed curve
+        min_val = float("inf")
         min_idx = -1
         for i in range(search_start, n):
-            if self._confidence_history[i] <= min_conf:
-                min_conf = self._confidence_history[i]
+            if smoothed[i] <= min_val:
+                min_val = smoothed[i]
                 min_idx = i
 
         if min_idx <= 0:
             return -1
 
-        # Pass 2: check if this is a meaningful dip relative to surroundings
-        avg_conf = sum(self._confidence_history[search_start:]) / max(1, n - search_start)
-        dip_ratio = min_conf / max(avg_conf, 1e-6)
+        # Check if this is a meaningful dip
+        avg_conf = sum(smoothed[search_start:]) / max(1, n - search_start)
+        dip_ratio = min_val / max(avg_conf, 1e-6)
 
-        # Accept if: below threshold (clear pause), OR a relative dip >= 20%
         effective_threshold = self.threshold if self.mode == "silero" else 0.5
-        if min_conf < effective_threshold or dip_ratio < 0.8:
+        if min_val < effective_threshold or dip_ratio < 0.8:
             log.debug(
-                f"Split point found at chunk {min_idx}/{n}: "
-                f"conf={min_conf:.3f}, avg={avg_conf:.3f}, dip_ratio={dip_ratio:.2f}"
+                f"Split point at chunk {min_idx}/{n}: "
+                f"smoothed={min_val:.3f}, avg={avg_conf:.3f}, dip_ratio={dip_ratio:.2f}"
             )
             return min_idx
 
-        # Pass 3: fallback — even a tiny dip is better than hard-cutting mid-word
-        # Accept any point that is below average confidence
-        if min_conf < avg_conf:
+        # Fallback: any point below average is better than hard cut
+        if min_val < avg_conf:
             log.debug(
                 f"Split point (fallback) at chunk {min_idx}/{n}: "
-                f"conf={min_conf:.3f}, avg={avg_conf:.3f}"
+                f"smoothed={min_val:.3f}, avg={avg_conf:.3f}"
             )
             return min_idx
 

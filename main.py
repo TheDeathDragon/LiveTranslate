@@ -389,10 +389,15 @@ class LiveTransApp:
             if result is None:
                 continue
 
+            original_text = result["text"].strip()
+            # Skip empty or punctuation-only ASR results
+            if not original_text or not any(c.isalnum() for c in original_text):
+                log.debug(f"ASR returned empty/punctuation-only, skipping: '{result['text']}'")
+                continue
+
             self._asr_count += 1
             self._msg_id += 1
             msg_id = self._msg_id
-            original_text = result["text"]
             source_lang = result["language"]
             timestamp = datetime.now().strftime("%H:%M:%S")
             log.info(f"ASR [{source_lang}] ({asr_ms:.0f}ms): {original_text}")
