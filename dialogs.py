@@ -311,6 +311,8 @@ class ModelDownloadDialog(QDialog):
                     download_silero()
                 elif m["type"] in ("sensevoice", "funasr-nano", "funasr-mlt-nano"):
                     download_asr(m["type"], hub=self._hub)
+                elif m["type"] == "qwen3-asr":
+                    download_asr("qwen3-asr", hub=self._hub)
                 elif m["type"].startswith("whisper-"):
                     size = m["type"].replace("whisper-", "")
                     download_asr("whisper", model_size=size, hub=self._hub)

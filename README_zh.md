@@ -13,7 +13,7 @@ Windows 实时音频翻译工具。捕获系统音频（WASAPI loopback），通
 ## 功能特性
 
 - **实时翻译**：系统音频 → 语音识别 → LLM 翻译 → 字幕显示，全流程自动
-- **多 ASR 引擎**：支持 faster-whisper、FunASR SenseVoice（日语优化）、FunASR Nano
+- **多 ASR 引擎**：支持 faster-whisper、FunASR SenseVoice（日语优化）、FunASR Nano、Qwen3-ASR（GGUF）
 - **灵活的翻译后端**：兼容所有 OpenAI 格式 API（DeepSeek、Grok、Qwen、GPT 等）
 - **低延迟 VAD**：32ms 音频块 + Silero VAD，自适应静音检测
 - **透明悬浮窗**：始终置顶、鼠标穿透、可拖拽，不影响正常操作
@@ -135,7 +135,7 @@ pip install funasr --no-deps
 ## 架构
 
 ```
-Audio (WASAPI 32ms) → VAD (Silero) → ASR (Whisper/SenseVoice/Nano) → LLM Translation → Overlay
+Audio (WASAPI 32ms) → VAD (Silero) → ASR (Whisper/SenseVoice/Nano/Qwen3) → LLM Translation → Overlay
 ```
 
 ```
@@ -145,6 +145,8 @@ main.py                 主入口，管线编排
 ├── asr_engine.py       faster-whisper ASR 后端
 ├── asr_sensevoice.py   FunASR SenseVoice 后端
 ├── asr_funasr_nano.py  FunASR Nano 后端
+├── asr_qwen3.py        Qwen3-ASR 后端 (ONNX + GGUF)
+├── qwen_asr_gguf/      Qwen3-ASR 推理引擎
 ├── translator.py       OpenAI 兼容翻译客户端
 ├── model_manager.py    模型检测、下载、缓存管理
 ├── subtitle_overlay.py PyQt6 透明悬浮窗
@@ -161,6 +163,12 @@ main.py                 主入口，管线编排
 - ASR 模型首次加载需要数秒（GPU）到数十秒（CPU）
 - 翻译质量取决于所用 LLM API 的能力
 - 嘈杂环境或多人同时说话时识别效果下降
+
+## 致谢
+
+- [CapsWriter-Offline](https://github.com/HaujetZhao/CapsWriter-Offline) — Qwen3-ASR 集成架构和热词系统参考
+- [Qwen3-ASR-GGUF](https://github.com/HaujetZhao/Qwen3-ASR-GGUF) — Qwen3-ASR 的 ONNX + GGUF 混合推理引擎
+- [llama.cpp](https://github.com/ggml-org/llama.cpp) — GGUF 模型推理运行时
 
 ## 许可证
 

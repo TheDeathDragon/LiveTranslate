@@ -13,7 +13,7 @@ Perfect for watching foreign-language videos, livestreams, and meetings — no p
 ## Features
 
 - **Real-time translation**: System audio → ASR → LLM translation → subtitle overlay, fully automatic
-- **Multiple ASR engines**: faster-whisper, FunASR SenseVoice (optimized for Japanese), FunASR Nano
+- **Multiple ASR engines**: faster-whisper, FunASR SenseVoice (optimized for Japanese), FunASR Nano, Qwen3-ASR (GGUF)
 - **Flexible translation backend**: Compatible with any OpenAI-format API (DeepSeek, Grok, Qwen, GPT, etc.)
 - **Low-latency VAD**: 32ms audio chunks + Silero VAD with adaptive silence detection
 - **Transparent overlay**: Always-on-top, click-through, draggable — doesn't interfere with your workflow
@@ -135,7 +135,7 @@ Open via the **Settings** button on the overlay or the system tray menu:
 ## Architecture
 
 ```
-Audio (WASAPI 32ms) → VAD (Silero) → ASR (Whisper/SenseVoice/Nano) → LLM Translation → Overlay
+Audio (WASAPI 32ms) → VAD (Silero) → ASR (Whisper/SenseVoice/Nano/Qwen3) → LLM Translation → Overlay
 ```
 
 ```
@@ -145,6 +145,8 @@ main.py                 Entry point & pipeline orchestration
 ├── asr_engine.py       faster-whisper ASR backend
 ├── asr_sensevoice.py   FunASR SenseVoice backend
 ├── asr_funasr_nano.py  FunASR Nano backend
+├── asr_qwen3.py        Qwen3-ASR backend (ONNX + GGUF)
+├── qwen_asr_gguf/      Qwen3-ASR inference engine
 ├── translator.py       OpenAI-compatible translation client
 ├── model_manager.py    Model detection, download & cache management
 ├── subtitle_overlay.py PyQt6 transparent overlay window
@@ -161,6 +163,12 @@ main.py                 Entry point & pipeline orchestration
 - ASR model first load takes a few seconds (GPU) to tens of seconds (CPU)
 - Translation quality depends on the LLM API used
 - Recognition degrades in noisy environments or with overlapping speakers
+
+## Acknowledgements
+
+- [CapsWriter-Offline](https://github.com/HaujetZhao/CapsWriter-Offline) — Qwen3-ASR integration architecture and hotword system reference
+- [Qwen3-ASR-GGUF](https://github.com/HaujetZhao/Qwen3-ASR-GGUF) — ONNX + GGUF hybrid inference engine for Qwen3-ASR
+- [llama.cpp](https://github.com/ggml-org/llama.cpp) — GGUF model inference runtime
 
 ## License
 

@@ -29,6 +29,8 @@ main.py (LiveTransApp)
   |-- asr_engine.py        faster-whisper (Whisper) backend
   |-- asr_sensevoice.py    FunASR SenseVoice backend (better for Japanese)
   |-- asr_funasr_nano.py   FunASR Nano backend
+  |-- asr_qwen3.py         Qwen3-ASR backend (ONNX Encoder + GGUF Decoder)
+  |-- qwen_asr_gguf/       Qwen3-ASR inference engine (from Qwen3-ASR-GGUF project)
   |-- translator.py        OpenAI-compatible API client, streaming, make_openai_client()
   |-- subtitle_overlay.py  PyQt6 transparent overlay (2-row header: controls + model/lang combos)
   |-- control_panel.py     Settings UI (5 tabs: VAD/ASR, Translation, Style, Benchmark, Cache)
@@ -110,6 +112,7 @@ Key overlay features:
 - VAD backtrack split: max duration时回溯confidence history找最低谷切分，remainder保留到下一段；三级策略（绝对低谷→相对低谷20%→低于均值兜底）
 - FunASR `disable_pbar=True` required in all `generate()` calls — tqdm crashes in GUI process when flushing stderr
 - ASR engine lifecycle: each engine exposes `unload()` (move to CPU + release) and `to_device(device)` (in-place migration). Device switching uses `to_device()` for PyTorch engines (SenseVoice/FunASR) and full reload for ctranslate2 (Whisper). Release order: `unload()` → `del` → `gc.collect()` → `torch.cuda.empty_cache()`
+- Qwen3-ASR: ONNX Encoder (DirectML) + llama.cpp GGUF Decoder (Vulkan). Model files auto-downloaded from GitHub Release. llama.cpp DLLs go in `qwen_asr_gguf/inference/bin/`. No PyTorch dependency at inference time. `to_device()` returns False (must reload). Context injection via `_context` field for continuous recognition accuracy.
 - Whisper (ctranslate2) only accepts `device="cuda"` not `"cuda:0"`; device index passed via `device_index` param. Parsed from combo text like `"cuda:0 (RTX 4090)"` in `_switch_asr_engine`
 - VAD speech density filter: `_flush_segment()` discards segments where <25% of chunks are above confidence threshold (noise rejection)
 - ASR text density filter: segments ≥2s producing ≤3 alnum characters are discarded as noise
