@@ -20,10 +20,16 @@ from model_manager import (
     is_asr_cached,
     ASR_DISPLAY_NAMES,
     MODELS_DIR,
+    get_qwen3_asr_model_dir,
 )
 
 # Set cache env BEFORE importing torch so TORCH_HOME is respected
 apply_cache_env()
+
+# Qwen3-ASR uses onnxruntime-directml (libomp140.dll) which conflicts with
+# PyTorch's libiomp5md.dll. Allow coexistence since they don't run concurrently.
+import os
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 # torch must be imported before PyQt6 to avoid DLL conflicts on Windows
 import torch  # noqa: F401
@@ -266,6 +272,9 @@ class LiveTransApp:
             return
         log.info(f"Switching ASR engine: {self._asr_type} -> {engine_type}")
         self._asr_ready = False
+        # Flush and reset VAD to stop accumulating audio during engine switch
+        self._vad.flush()
+        self._vad._reset()
         device = self._asr_device
         hub = "ms"
         if self._panel:
@@ -321,7 +330,14 @@ class LiveTransApp:
                     dev_index = int(part.split(":")[1])
                     dev = "cuda"
 
-                if engine_type == "sensevoice":
+                if engine_type == "qwen3-asr":
+                    from asr_qwen3 import Qwen3ASREngine
+
+                    new_asr[0] = Qwen3ASREngine(
+                        model_dir=get_qwen3_asr_model_dir(),
+                        use_dml=(dev != "cpu"),
+                    )
+                elif engine_type == "sensevoice":
                     from asr_sensevoice import SenseVoiceEngine
 
                     new_asr[0] = SenseVoiceEngine(device=device, hub=hub)
@@ -499,9 +515,20 @@ class LiveTransApp:
             )
 
     def _pipeline_loop(self):
+        silence_chunk = np.zeros(
+            int(self._config["audio"]["sample_rate"] * self._config["audio"]["chunk_duration"]),
+            dtype=np.float32,
+        )
         while self._running:
             chunk = self._audio.get_audio(timeout=1.0)
             if chunk is None:
+                if self._vad._is_speaking and not self._paused:
+                    n = self._vad._get_effective_silence_limit() + 1
+                    for _ in range(n):
+                        seg = self._vad.process_chunk(silence_chunk)
+                        if seg is not None and self._asr_ready:
+                            self._process_segment(seg)
+                            break
                 continue
 
             rms = float(np.sqrt(np.mean(chunk**2)))
