@@ -91,6 +91,7 @@ def is_qwen3_asr_ready() -> bool:
     if not bin_dir.exists():
         return False
     import sys
+
     if sys.platform == "win32":
         required_dlls = ["llama.dll", "ggml.dll", "ggml-base.dll"]
     else:
@@ -207,6 +208,7 @@ LLAMA_CPP_LATEST_API = "https://api.github.com/repos/ggml-org/llama.cpp/releases
 def _download_file(url: str, dest: Path, desc: str = ""):
     """Download a file with progress logging."""
     import urllib.request
+
     log.info(f"Downloading {desc or url}...")
     try:
         urllib.request.urlretrieve(url, str(dest))
@@ -237,14 +239,19 @@ def download_qwen3_asr():
             for member in zf.namelist():
                 basename = os.path.basename(member)
                 if basename and basename in QWEN3_ASR_FILES:
-                    with zf.open(member) as src, open(str(model_dir / basename), "wb") as dst:
+                    with (
+                        zf.open(member) as src,
+                        open(str(model_dir / basename), "wb") as dst,
+                    ):
                         import shutil
+
                         shutil.copyfileobj(src, dst)
         zip_path.unlink(missing_ok=True)
         log.info(f"Model extracted to {model_dir}")
 
     # 2. Download and extract llama.cpp DLLs if missing
     import sys
+
     if sys.platform == "win32":
         required_dlls = ["llama.dll", "ggml.dll", "ggml-base.dll"]
     else:
@@ -255,7 +262,9 @@ def download_qwen3_asr():
         # Get latest release tag
         log.info("Fetching latest llama.cpp release tag...")
         try:
-            req = urllib.request.Request(LLAMA_CPP_LATEST_API, headers={"User-Agent": "LiveTrans"})
+            req = urllib.request.Request(
+                LLAMA_CPP_LATEST_API, headers={"User-Agent": "LiveTrans"}
+            )
             with urllib.request.urlopen(req, timeout=15) as resp:
                 tag = json.loads(resp.read())["tag_name"]
         except Exception:
@@ -271,16 +280,24 @@ def download_qwen3_asr():
             for member in zf.namelist():
                 basename = os.path.basename(member)
                 if basename in required_dlls:
-                    with zf.open(member) as src, open(str(bin_dir / basename), "wb") as dst:
+                    with (
+                        zf.open(member) as src,
+                        open(str(bin_dir / basename), "wb") as dst,
+                    ):
                         import shutil
+
                         shutil.copyfileobj(src, dst)
         # Also extract ggml-vulkan.dll and other ggml backend DLLs
         with zipfile.ZipFile(str(zip_path), "r") as zf:
             for member in zf.namelist():
                 basename = os.path.basename(member)
                 if basename.startswith("ggml-") and basename.endswith(".dll"):
-                    with zf.open(member) as src, open(str(bin_dir / basename), "wb") as dst:
+                    with (
+                        zf.open(member) as src,
+                        open(str(bin_dir / basename), "wb") as dst,
+                    ):
                         import shutil
+
                         shutil.copyfileobj(src, dst)
         zip_path.unlink(missing_ok=True)
         log.info(f"DLLs extracted to {bin_dir}")
@@ -370,7 +387,9 @@ def get_cache_entries():
 
     # llama.cpp DLLs
     bin_dir = APP_DIR / "qwen_asr_gguf" / "inference" / "bin"
-    if bin_dir.exists() and any(f for f in bin_dir.iterdir() if f.suffix in (".dll", ".so")):
+    if bin_dir.exists() and any(
+        f for f in bin_dir.iterdir() if f.suffix in (".dll", ".so")
+    ):
         entries.append(("llama.cpp (Vulkan)", bin_dir))
 
     return entries

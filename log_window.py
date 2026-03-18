@@ -1,5 +1,12 @@
 import logging
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QTextEdit, QHBoxLayout, QPushButton, QCheckBox
+from PyQt6.QtWidgets import (
+    QWidget,
+    QVBoxLayout,
+    QTextEdit,
+    QHBoxLayout,
+    QPushButton,
+    QCheckBox,
+)
 from PyQt6.QtCore import pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QFont, QTextCursor
 from i18n import t
@@ -62,8 +69,9 @@ class LogWindow(QWidget):
     def get_handler(self):
         handler = QLogHandler(self.log_signal)
         handler.setLevel(logging.DEBUG)
-        fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-                                datefmt="%H:%M:%S")
+        fmt = logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%H:%M:%S"
+        )
         handler.setFormatter(fmt)
         return handler
 

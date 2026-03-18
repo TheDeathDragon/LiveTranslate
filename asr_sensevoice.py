@@ -6,8 +6,11 @@ log = logging.getLogger("LiveTrans.SenseVoice")
 
 # Language tag mapping from SenseVoice output
 LANG_MAP = {
-    "<|zh|>": "zh", "<|en|>": "en", "<|ja|>": "ja",
-    "<|ko|>": "ko", "<|yue|>": "yue",
+    "<|zh|>": "zh",
+    "<|en|>": "en",
+    "<|ja|>": "ja",
+    "<|ko|>": "ko",
+    "<|yue|>": "yue",
 }
 
 

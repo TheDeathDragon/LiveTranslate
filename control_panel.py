@@ -38,11 +38,36 @@ from model_manager import (
     format_size,
     get_cache_entries,
 )
-from i18n import t
+from i18n import t, LANGUAGES
 
 log = logging.getLogger("LiveTrans.Panel")
 
 SETTINGS_FILE = Path(__file__).parent / "user_settings.json"
+
+
+_VALID_KEYS = {
+    "hub",
+    "asr_engine",
+    "asr_language",
+    "asr_device",
+    "whisper_model_size",
+    "vad_mode",
+    "vad_threshold",
+    "energy_threshold",
+    "min_speech_duration",
+    "max_speech_duration",
+    "silence_mode",
+    "silence_duration",
+    "audio_device",
+    "mic_device",
+    "models",
+    "active_model",
+    "system_prompt",
+    "timeout",
+    "target_language",
+    "ui_lang",
+    "style",
+}
 
 
 def _load_saved_settings() -> dict | None:
@@ -50,6 +75,12 @@ def _load_saved_settings() -> dict | None:
         if SETTINGS_FILE.exists():
             data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
             log.info(f"Loaded saved settings from {SETTINGS_FILE}")
+            stale = set(data.keys()) - _VALID_KEYS
+            if stale:
+                for k in stale:
+                    del data[k]
+                log.info(f"Removed stale settings keys: {stale}")
+                _save_settings(data)
             return data
     except Exception as e:
         log.warning(f"Failed to load settings: {e}")
@@ -178,27 +209,16 @@ class ControlPanel(QWidget):
         self._asr_engine.currentIndexChanged.connect(self._auto_save)
 
         self._asr_lang = QComboBox()
-        self._asr_lang.setEditable(True)
-        default_langs = ["auto", "ja", "en", "zh", "ko", "fr", "de", "es", "ru"]
-        extra_langs = s.get("asr_languages_extra", [])
-        all_langs = default_langs + [x for x in extra_langs if x not in default_langs]
-        self._asr_lang.addItems(all_langs)
+        for code, native in LANGUAGES:
+            label = t("asr_lang_auto") if code == "auto" else native
+            self._asr_lang.addItem(f"{code} - {label}", code)
         lang = s.get("asr_language", self._config["asr"].get("language", "auto"))
-        idx = self._asr_lang.findText(lang)
+        idx = self._asr_lang.findData(lang)
         if idx >= 0:
             self._asr_lang.setCurrentIndex(idx)
-        else:
-            self._asr_lang.addItem(lang)
-            self._asr_lang.setCurrentIndex(self._asr_lang.count() - 1)
         asr_layout.addWidget(QLabel(t("label_language_hint")), 1, 0)
         asr_layout.addWidget(self._asr_lang, 1, 1)
         self._asr_lang.currentIndexChanged.connect(self._auto_save)
-        from PyQt6.QtCore import QRegularExpression
-        from PyQt6.QtGui import QRegularExpressionValidator
-        self._asr_lang.setValidator(
-            QRegularExpressionValidator(QRegularExpression(r"[a-zA-Z]{2,4}(-[a-zA-Z]{2,4})?"))
-        )
-        self._asr_lang.lineEdit().editingFinished.connect(self._on_asr_lang_edited)
 
         self._asr_device = QComboBox()
         devices = ["cuda", "cpu"]
@@ -223,6 +243,7 @@ class ControlPanel(QWidget):
         self._asr_device.currentIndexChanged.connect(self._auto_save)
 
         self._audio_device = QComboBox()
+        self._audio_device.addItem(t("audio_disabled"))
         self._audio_device.addItem(t("system_default"))
         try:
             from audio_capture import list_output_devices
@@ -232,10 +253,14 @@ class ControlPanel(QWidget):
         except Exception:
             pass
         saved_audio = s.get("audio_device")
-        if saved_audio:
+        if saved_audio == "__disabled__":
+            self._audio_device.setCurrentIndex(0)
+        elif saved_audio:
             idx = self._audio_device.findText(saved_audio)
             if idx >= 0:
                 self._audio_device.setCurrentIndex(idx)
+        else:
+            self._audio_device.setCurrentIndex(1)  # system default
         asr_layout.addWidget(QLabel(t("label_audio")), 3, 0)
         asr_layout.addWidget(self._audio_device, 3, 1)
         self._audio_device.currentIndexChanged.connect(self._auto_save)
@@ -245,6 +270,7 @@ class ControlPanel(QWidget):
         self._mic_device.addItem(t("system_default"))
         try:
             from audio_capture import list_input_devices
+
             for name in list_input_devices():
                 self._mic_device.addItem(name)
         except Exception:
@@ -272,6 +298,7 @@ class ControlPanel(QWidget):
         self._ui_lang_combo = QComboBox()
         self._ui_lang_combo.addItems(["English", "中文"])
         from i18n import get_lang
+
         saved_lang = s.get("ui_lang", get_lang())
         self._ui_lang_combo.setCurrentIndex(0 if saved_lang == "en" else 1)
         asr_layout.addWidget(QLabel(t("label_ui_lang")), 6, 0)
@@ -284,12 +311,18 @@ class ControlPanel(QWidget):
         self._whisper_group = QGroupBox(t("group_download_whisper"))
         whisper_layout = QHBoxLayout(self._whisper_group)
         self._whisper_size_combo = QComboBox()
-        self._whisper_size_combo.addItems(["tiny", "base", "small", "medium", "large-v3"])
-        saved_size = s.get("whisper_model_size", self._config["asr"].get("model_size", "medium"))
+        self._whisper_size_combo.addItems(
+            ["tiny", "base", "small", "medium", "large-v3"]
+        )
+        saved_size = s.get(
+            "whisper_model_size", self._config["asr"].get("model_size", "medium")
+        )
         size_idx = self._whisper_size_combo.findText(saved_size)
         if size_idx >= 0:
             self._whisper_size_combo.setCurrentIndex(size_idx)
-        self._whisper_size_combo.currentIndexChanged.connect(self._on_whisper_size_changed)
+        self._whisper_size_combo.currentIndexChanged.connect(
+            self._on_whisper_size_changed
+        )
         whisper_layout.addWidget(self._whisper_size_combo)
         self._whisper_status = QLabel("")
         self._whisper_status.setStyleSheet("color: #888; font-size: 11px;")
@@ -299,15 +332,15 @@ class ControlPanel(QWidget):
         whisper_layout.addWidget(self._whisper_dl_btn)
         layout.addWidget(self._whisper_group)
         self._whisper_group.setVisible(engine_idx == 0)
-        self._asr_engine.currentIndexChanged.connect(self._on_engine_changed_whisper_vis)
+        self._asr_engine.currentIndexChanged.connect(
+            self._on_engine_changed_whisper_vis
+        )
         self._update_whisper_size_label()
 
         mode_group = QGroupBox(t("group_vad_mode"))
         mode_layout = QVBoxLayout(mode_group)
         self._vad_mode = QComboBox()
-        self._vad_mode.addItems(
-            [t("vad_silero"), t("vad_energy"), t("vad_disabled")]
-        )
+        self._vad_mode.addItems([t("vad_silero"), t("vad_energy"), t("vad_disabled")])
         mode_map = {"silero": 0, "energy": 1, "disabled": 2}
         self._vad_mode.setCurrentIndex(mode_map.get(s.get("vad_mode", "energy"), 1))
         self._vad_mode.currentIndexChanged.connect(self._on_vad_mode_changed)
@@ -514,7 +547,9 @@ class ControlPanel(QWidget):
         bg_layout = QGridLayout(bg_group)
 
         bg_layout.addWidget(QLabel(t("label_bg_color")), 0, 0)
-        self._bg_color_btn = self._make_color_btn(s.get("bg_color", DEFAULT_STYLE["bg_color"]))
+        self._bg_color_btn = self._make_color_btn(
+            s.get("bg_color", DEFAULT_STYLE["bg_color"])
+        )
         self._bg_color_btn.clicked.connect(lambda: self._pick_color(self._bg_color_btn))
         bg_layout.addWidget(self._bg_color_btn, 0, 1)
 
@@ -523,23 +558,33 @@ class ControlPanel(QWidget):
         self._bg_opacity.setRange(0, 255)
         self._bg_opacity.setValue(s.get("bg_opacity", DEFAULT_STYLE["bg_opacity"]))
         self._bg_opacity_label = QLabel(str(self._bg_opacity.value()))
-        self._bg_opacity.valueChanged.connect(lambda v: self._bg_opacity_label.setText(str(v)))
+        self._bg_opacity.valueChanged.connect(
+            lambda v: self._bg_opacity_label.setText(str(v))
+        )
         self._bg_opacity.valueChanged.connect(self._on_style_value_changed)
         self._bg_opacity.sliderReleased.connect(self._auto_save)
         bg_layout.addWidget(self._bg_opacity, 1, 1)
         bg_layout.addWidget(self._bg_opacity_label, 1, 2)
 
         bg_layout.addWidget(QLabel(t("label_header_color")), 2, 0)
-        self._header_color_btn = self._make_color_btn(s.get("header_color", DEFAULT_STYLE["header_color"]))
-        self._header_color_btn.clicked.connect(lambda: self._pick_color(self._header_color_btn))
+        self._header_color_btn = self._make_color_btn(
+            s.get("header_color", DEFAULT_STYLE["header_color"])
+        )
+        self._header_color_btn.clicked.connect(
+            lambda: self._pick_color(self._header_color_btn)
+        )
         bg_layout.addWidget(self._header_color_btn, 2, 1)
 
         bg_layout.addWidget(QLabel(t("label_header_opacity")), 3, 0)
         self._header_opacity = QSlider(Qt.Orientation.Horizontal)
         self._header_opacity.setRange(0, 255)
-        self._header_opacity.setValue(s.get("header_opacity", DEFAULT_STYLE["header_opacity"]))
+        self._header_opacity.setValue(
+            s.get("header_opacity", DEFAULT_STYLE["header_opacity"])
+        )
         self._header_opacity_label = QLabel(str(self._header_opacity.value()))
-        self._header_opacity.valueChanged.connect(lambda v: self._header_opacity_label.setText(str(v)))
+        self._header_opacity.valueChanged.connect(
+            lambda v: self._header_opacity_label.setText(str(v))
+        )
         self._header_opacity.valueChanged.connect(self._on_style_value_changed)
         self._header_opacity.sliderReleased.connect(self._auto_save)
         bg_layout.addWidget(self._header_opacity, 3, 1)
@@ -548,7 +593,9 @@ class ControlPanel(QWidget):
         bg_layout.addWidget(QLabel(t("label_border_radius")), 4, 0)
         self._border_radius = QSpinBox()
         self._border_radius.setRange(0, 30)
-        self._border_radius.setValue(s.get("border_radius", DEFAULT_STYLE["border_radius"]))
+        self._border_radius.setValue(
+            s.get("border_radius", DEFAULT_STYLE["border_radius"])
+        )
         self._border_radius.setSuffix(" px")
         self._border_radius.valueChanged.connect(self._on_style_value_changed)
         self._border_radius.valueChanged.connect(self._auto_save)
@@ -562,7 +609,9 @@ class ControlPanel(QWidget):
 
         text_layout.addWidget(QLabel(t("label_original_font")), 0, 0)
         self._orig_font_combo = QFontComboBox()
-        self._orig_font_combo.setCurrentFont(QFont(s.get("original_font_family", DEFAULT_STYLE["original_font_family"])))
+        self._orig_font_combo.setCurrentFont(
+            QFont(s.get("original_font_family", DEFAULT_STYLE["original_font_family"]))
+        )
         self._orig_font_combo.currentFontChanged.connect(self._on_style_value_changed)
         self._orig_font_combo.currentFontChanged.connect(self._auto_save)
         text_layout.addWidget(self._orig_font_combo, 0, 1)
@@ -570,20 +619,32 @@ class ControlPanel(QWidget):
         text_layout.addWidget(QLabel(t("label_original_font_size")), 1, 0)
         self._orig_font_size = QSpinBox()
         self._orig_font_size.setRange(6, 24)
-        self._orig_font_size.setValue(s.get("original_font_size", DEFAULT_STYLE["original_font_size"]))
+        self._orig_font_size.setValue(
+            s.get("original_font_size", DEFAULT_STYLE["original_font_size"])
+        )
         self._orig_font_size.setSuffix(" pt")
         self._orig_font_size.valueChanged.connect(self._on_style_value_changed)
         self._orig_font_size.valueChanged.connect(self._auto_save)
         text_layout.addWidget(self._orig_font_size, 1, 1)
 
         text_layout.addWidget(QLabel(t("label_original_color")), 2, 0)
-        self._orig_color_btn = self._make_color_btn(s.get("original_color", DEFAULT_STYLE["original_color"]))
-        self._orig_color_btn.clicked.connect(lambda: self._pick_color(self._orig_color_btn))
+        self._orig_color_btn = self._make_color_btn(
+            s.get("original_color", DEFAULT_STYLE["original_color"])
+        )
+        self._orig_color_btn.clicked.connect(
+            lambda: self._pick_color(self._orig_color_btn)
+        )
         text_layout.addWidget(self._orig_color_btn, 2, 1)
 
         text_layout.addWidget(QLabel(t("label_translation_font")), 3, 0)
         self._trans_font_combo = QFontComboBox()
-        self._trans_font_combo.setCurrentFont(QFont(s.get("translation_font_family", DEFAULT_STYLE["translation_font_family"])))
+        self._trans_font_combo.setCurrentFont(
+            QFont(
+                s.get(
+                    "translation_font_family", DEFAULT_STYLE["translation_font_family"]
+                )
+            )
+        )
         self._trans_font_combo.currentFontChanged.connect(self._on_style_value_changed)
         self._trans_font_combo.currentFontChanged.connect(self._auto_save)
         text_layout.addWidget(self._trans_font_combo, 3, 1)
@@ -591,19 +652,27 @@ class ControlPanel(QWidget):
         text_layout.addWidget(QLabel(t("label_translation_font_size")), 4, 0)
         self._trans_font_size = QSpinBox()
         self._trans_font_size.setRange(6, 24)
-        self._trans_font_size.setValue(s.get("translation_font_size", DEFAULT_STYLE["translation_font_size"]))
+        self._trans_font_size.setValue(
+            s.get("translation_font_size", DEFAULT_STYLE["translation_font_size"])
+        )
         self._trans_font_size.setSuffix(" pt")
         self._trans_font_size.valueChanged.connect(self._on_style_value_changed)
         self._trans_font_size.valueChanged.connect(self._auto_save)
         text_layout.addWidget(self._trans_font_size, 4, 1)
 
         text_layout.addWidget(QLabel(t("label_translation_color")), 5, 0)
-        self._trans_color_btn = self._make_color_btn(s.get("translation_color", DEFAULT_STYLE["translation_color"]))
-        self._trans_color_btn.clicked.connect(lambda: self._pick_color(self._trans_color_btn))
+        self._trans_color_btn = self._make_color_btn(
+            s.get("translation_color", DEFAULT_STYLE["translation_color"])
+        )
+        self._trans_color_btn.clicked.connect(
+            lambda: self._pick_color(self._trans_color_btn)
+        )
         text_layout.addWidget(self._trans_color_btn, 5, 1)
 
         text_layout.addWidget(QLabel(t("label_timestamp_color")), 6, 0)
-        self._ts_color_btn = self._make_color_btn(s.get("timestamp_color", DEFAULT_STYLE["timestamp_color"]))
+        self._ts_color_btn = self._make_color_btn(
+            s.get("timestamp_color", DEFAULT_STYLE["timestamp_color"])
+        )
         self._ts_color_btn.clicked.connect(lambda: self._pick_color(self._ts_color_btn))
         text_layout.addWidget(self._ts_color_btn, 6, 1)
 
@@ -615,9 +684,13 @@ class ControlPanel(QWidget):
         win_layout.addWidget(QLabel(t("label_window_opacity")), 0, 0)
         self._window_opacity = QSlider(Qt.Orientation.Horizontal)
         self._window_opacity.setRange(30, 100)
-        self._window_opacity.setValue(s.get("window_opacity", DEFAULT_STYLE["window_opacity"]))
+        self._window_opacity.setValue(
+            s.get("window_opacity", DEFAULT_STYLE["window_opacity"])
+        )
         self._window_opacity_label = QLabel(f"{self._window_opacity.value()}%")
-        self._window_opacity.valueChanged.connect(lambda v: self._window_opacity_label.setText(f"{v}%"))
+        self._window_opacity.valueChanged.connect(
+            lambda v: self._window_opacity_label.setText(f"{v}%")
+        )
         self._window_opacity.valueChanged.connect(self._on_style_value_changed)
         self._window_opacity.sliderReleased.connect(self._auto_save)
         win_layout.addWidget(self._window_opacity, 0, 1)
@@ -631,17 +704,22 @@ class ControlPanel(QWidget):
         btn = QPushButton()
         btn.setFixedSize(60, 24)
         btn.setProperty("hex_color", color)
-        btn.setStyleSheet(f"background-color: {color}; border: 1px solid #888; border-radius: 3px;")
+        btn.setStyleSheet(
+            f"background-color: {color}; border: 1px solid #888; border-radius: 3px;"
+        )
         return btn
 
     def _pick_color(self, btn: QPushButton):
         from PyQt6.QtGui import QColor as _QColor
+
         current = _QColor(btn.property("hex_color"))
         color = QColorDialog.getColor(current, self)
         if color.isValid():
             hex_c = color.name()
             btn.setProperty("hex_color", hex_c)
-            btn.setStyleSheet(f"background-color: {hex_c}; border: 1px solid #888; border-radius: 3px;")
+            btn.setStyleSheet(
+                f"background-color: {hex_c}; border: 1px solid #888; border-radius: 3px;"
+            )
             self._on_style_value_changed()
             self._auto_save()
 
@@ -666,10 +744,14 @@ class ControlPanel(QWidget):
     def _apply_style_to_controls(self, s: dict):
         """Update all style controls to match a style dict, without triggering auto-save."""
         self._bg_color_btn.setProperty("hex_color", s["bg_color"])
-        self._bg_color_btn.setStyleSheet(f"background-color: {s['bg_color']}; border: 1px solid #888; border-radius: 3px;")
+        self._bg_color_btn.setStyleSheet(
+            f"background-color: {s['bg_color']}; border: 1px solid #888; border-radius: 3px;"
+        )
         self._bg_opacity.setValue(s["bg_opacity"])
         self._header_color_btn.setProperty("hex_color", s["header_color"])
-        self._header_color_btn.setStyleSheet(f"background-color: {s['header_color']}; border: 1px solid #888; border-radius: 3px;")
+        self._header_color_btn.setStyleSheet(
+            f"background-color: {s['header_color']}; border: 1px solid #888; border-radius: 3px;"
+        )
         self._header_opacity.setValue(s["header_opacity"])
         self._border_radius.setValue(s["border_radius"])
         self._orig_font_combo.setCurrentFont(QFont(s["original_font_family"]))
@@ -677,15 +759,22 @@ class ControlPanel(QWidget):
         self._orig_font_size.setValue(s["original_font_size"])
         self._trans_font_size.setValue(s["translation_font_size"])
         self._orig_color_btn.setProperty("hex_color", s["original_color"])
-        self._orig_color_btn.setStyleSheet(f"background-color: {s['original_color']}; border: 1px solid #888; border-radius: 3px;")
+        self._orig_color_btn.setStyleSheet(
+            f"background-color: {s['original_color']}; border: 1px solid #888; border-radius: 3px;"
+        )
         self._trans_color_btn.setProperty("hex_color", s["translation_color"])
-        self._trans_color_btn.setStyleSheet(f"background-color: {s['translation_color']}; border: 1px solid #888; border-radius: 3px;")
+        self._trans_color_btn.setStyleSheet(
+            f"background-color: {s['translation_color']}; border: 1px solid #888; border-radius: 3px;"
+        )
         self._ts_color_btn.setProperty("hex_color", s["timestamp_color"])
-        self._ts_color_btn.setStyleSheet(f"background-color: {s['timestamp_color']}; border: 1px solid #888; border-radius: 3px;")
+        self._ts_color_btn.setStyleSheet(
+            f"background-color: {s['timestamp_color']}; border: 1px solid #888; border-radius: 3px;"
+        )
         self._window_opacity.setValue(s["window_opacity"])
 
     def _on_preset_changed(self, index):
         from subtitle_overlay import STYLE_PRESETS
+
         key = self._preset_keys[index]
         if key == "custom":
             return
@@ -704,11 +793,16 @@ class ControlPanel(QWidget):
             self._style_preset.blockSignals(True)
             self._style_preset.setCurrentIndex(custom_idx)
             self._style_preset.blockSignals(False)
-        if not self._bg_opacity.isSliderDown() and not self._header_opacity.isSliderDown() and not self._window_opacity.isSliderDown():
+        if (
+            not self._bg_opacity.isSliderDown()
+            and not self._header_opacity.isSliderDown()
+            and not self._window_opacity.isSliderDown()
+        ):
             self._auto_save()
 
     def _reset_style(self):
         from subtitle_overlay import DEFAULT_STYLE
+
         self._style_preset.blockSignals(True)
         self._style_preset.setCurrentIndex(0)  # default
         self._style_preset.blockSignals(False)
@@ -718,10 +812,16 @@ class ControlPanel(QWidget):
         self._auto_save()
 
     def _block_style_signals(self, block: bool):
-        for w in (self._bg_opacity, self._header_opacity, self._border_radius,
-                  self._orig_font_combo, self._trans_font_combo,
-                  self._orig_font_size, self._trans_font_size,
-                  self._window_opacity):
+        for w in (
+            self._bg_opacity,
+            self._header_opacity,
+            self._border_radius,
+            self._orig_font_combo,
+            self._trans_font_combo,
+            self._orig_font_size,
+            self._trans_font_size,
+            self._window_opacity,
+        ):
             w.blockSignals(block)
 
     # ── Benchmark Tab ──
@@ -845,21 +945,16 @@ class ControlPanel(QWidget):
                 log.error(f"Failed to delete {path}: {e}")
         QApplication.instance().quit()
 
-    def _on_asr_lang_edited(self):
-        text = self._asr_lang.currentText().strip().lower()
-        if not text:
-            return
-        self._asr_lang.setEditText(text)
-        if self._asr_lang.findText(text) < 0:
-            self._asr_lang.addItem(text)
-            self._asr_lang.setCurrentIndex(self._asr_lang.count() - 1)
-        self._auto_save()
+    def _get_asr_lang_code(self) -> str:
+        """Get the language code from the ASR language combo (stored as userData)."""
+        return self._asr_lang.currentData() or "auto"
 
     def _on_engine_changed_whisper_vis(self, index):
         self._whisper_group.setVisible(index == 0)
 
     def _update_whisper_size_label(self):
         from model_manager import is_asr_cached, _MODEL_SIZE_BYTES
+
         size = self._whisper_size_combo.currentText()
         cached = is_asr_cached("whisper", size, self._current_settings.get("hub", "ms"))
         if cached:
@@ -873,16 +968,20 @@ class ControlPanel(QWidget):
             self._whisper_dl_btn.setEnabled(True)
 
     def _on_whisper_size_changed(self):
-        self._current_settings["whisper_model_size"] = self._whisper_size_combo.currentText()
+        self._current_settings["whisper_model_size"] = (
+            self._whisper_size_combo.currentText()
+        )
         self._update_whisper_size_label()
         # If already cached, switch engine immediately
         from model_manager import is_asr_cached
+
         size = self._whisper_size_combo.currentText()
         if is_asr_cached("whisper", size, self._current_settings.get("hub", "ms")):
             self._auto_save()
 
     def _download_whisper(self):
         from model_manager import is_asr_cached, get_missing_models
+
         size = self._whisper_size_combo.currentText()
         hub = self._current_settings.get("hub", "ms")
         if is_asr_cached("whisper", size, hub):
@@ -892,6 +991,7 @@ class ControlPanel(QWidget):
         if not missing:
             return
         from dialogs import ModelDownloadDialog
+
         dlg = ModelDownloadDialog(missing, hub=hub, parent=self)
         if dlg.exec() == dlg.DialogCode.Accepted:
             self._update_whisper_size_label()
@@ -1039,7 +1139,9 @@ class ControlPanel(QWidget):
     def _on_timing_changed(self):
         self._current_settings["min_speech_duration"] = self._min_speech.value()
         self._current_settings["max_speech_duration"] = self._max_speech.value()
-        self._current_settings["silence_mode"] = "auto" if self._silence_mode.currentIndex() == 0 else "fixed"
+        self._current_settings["silence_mode"] = (
+            "auto" if self._silence_mode.currentIndex() == 0 else "fixed"
+        )
         self._current_settings["silence_duration"] = self._silence_duration.value()
 
     def _on_ui_lang_changed(self, index):
@@ -1047,12 +1149,15 @@ class ControlPanel(QWidget):
         self._current_settings["ui_lang"] = lang
         _save_settings(self._current_settings)
         from i18n import set_lang
+
         set_lang(lang)
         from PyQt6.QtWidgets import QMessageBox
+
         QMessageBox.information(
-            self, "LiveTrans",
+            self,
+            "LiveTrans",
             "Language changed. Please restart the application.\n"
-            "语言已更改，请重启应用程序。"
+            "语言已更改，请重启应用程序。",
         )
 
     def _auto_save(self):
@@ -1073,11 +1178,7 @@ class ControlPanel(QWidget):
             log.info("System prompt updated")
 
     def _apply_settings(self):
-        self._current_settings["asr_language"] = self._asr_lang.currentText()
-        default_langs = {"auto", "ja", "en", "zh", "ko", "fr", "de", "es", "ru"}
-        extra = [self._asr_lang.itemText(i) for i in range(self._asr_lang.count())
-                 if self._asr_lang.itemText(i) not in default_langs]
-        self._current_settings["asr_languages_extra"] = extra
+        self._current_settings["asr_language"] = self._get_asr_lang_code()
         engine_map = {
             0: "whisper",
             1: "sensevoice",
@@ -1088,13 +1189,18 @@ class ControlPanel(QWidget):
         self._current_settings["asr_engine"] = engine_map[
             self._asr_engine.currentIndex()
         ]
-        self._current_settings["whisper_model_size"] = self._whisper_size_combo.currentText()
+        self._current_settings["whisper_model_size"] = (
+            self._whisper_size_combo.currentText()
+        )
         dev_text = self._asr_device.currentText()
         self._current_settings["asr_device"] = dev_text.split(" (")[0]
-        audio_dev = self._audio_device.currentText()
-        self._current_settings["audio_device"] = (
-            None if self._audio_device.currentIndex() == 0 else audio_dev
-        )
+        audio_idx = self._audio_device.currentIndex()
+        if audio_idx == 0:
+            self._current_settings["audio_device"] = "__disabled__"
+        elif audio_idx == 1:
+            self._current_settings["audio_device"] = None
+        else:
+            self._current_settings["audio_device"] = self._audio_device.currentText()
         mic_idx = self._mic_device.currentIndex()
         if mic_idx == 0:
             self._current_settings["mic_device"] = None

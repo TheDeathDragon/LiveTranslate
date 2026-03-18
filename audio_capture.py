@@ -23,9 +23,11 @@ def list_output_devices():
     if wasapi_idx is not None:
         for i in range(pa.get_device_count()):
             dev = pa.get_device_info_by_index(i)
-            if (dev["hostApi"] == wasapi_idx
-                    and dev["maxOutputChannels"] > 0
-                    and not dev.get("isLoopbackDevice", False)):
+            if (
+                dev["hostApi"] == wasapi_idx
+                and dev["maxOutputChannels"] > 0
+                and not dev.get("isLoopbackDevice", False)
+            ):
                 devices.append(dev["name"])
     pa.terminate()
     return devices
@@ -44,9 +46,11 @@ def list_input_devices():
     if wasapi_idx is not None:
         for i in range(pa.get_device_count()):
             dev = pa.get_device_info_by_index(i)
-            if (dev["hostApi"] == wasapi_idx
-                    and dev["maxInputChannels"] > 0
-                    and not dev.get("isLoopbackDevice", False)):
+            if (
+                dev["hostApi"] == wasapi_idx
+                and dev["maxInputChannels"] > 0
+                and not dev.get("isLoopbackDevice", False)
+            ):
                 devices.append(dev["name"])
     pa.terminate()
     return devices
@@ -67,6 +71,7 @@ class AudioCapture:
         self._native_channels = 2
         self._native_rate = 44100
         self._current_device_name = None
+        self._loopback_disabled = False
         self._lock = threading.Lock()
         self._restart_event = threading.Event()
         # Microphone input
@@ -121,7 +126,9 @@ class AudioCapture:
 
         for i in range(self._pa.get_device_count()):
             dev = self._pa.get_device_info_by_index(i)
-            if dev["hostApi"] == wasapi_info["index"] and dev.get("isLoopbackDevice", False):
+            if dev["hostApi"] == wasapi_info["index"] and dev.get(
+                "isLoopbackDevice", False
+            ):
                 if target_name in dev["name"]:
                     return dev
 
@@ -141,7 +148,9 @@ class AudioCapture:
         self._current_device_name = loopback_dev["name"]
 
         log.info(f"Loopback device: {loopback_dev['name']}")
-        log.info(f"Native: {self._native_rate}Hz, {self._native_channels}ch -> {self.sample_rate}Hz mono")
+        log.info(
+            f"Native: {self._native_rate}Hz, {self._native_channels}ch -> {self.sample_rate}Hz mono"
+        )
 
         native_chunk = int(self._native_rate * self.chunk_duration)
 
@@ -176,10 +185,12 @@ class AudioCapture:
             raise RuntimeError("Default input device has no input channels")
         for i in range(self._pa.get_device_count()):
             dev = self._pa.get_device_info_by_index(i)
-            if (dev["hostApi"] == wasapi_info["index"]
-                    and dev["maxInputChannels"] > 0
-                    and not dev.get("isLoopbackDevice", False)
-                    and dev["name"] == self._mic_device_name):
+            if (
+                dev["hostApi"] == wasapi_info["index"]
+                and dev["maxInputChannels"] > 0
+                and not dev.get("isLoopbackDevice", False)
+                and dev["name"] == self._mic_device_name
+            ):
                 return dev
         raise RuntimeError(f"Mic device not found: {self._mic_device_name}")
 
@@ -189,7 +200,9 @@ class AudioCapture:
         self._mic_native_channels = dev["maxInputChannels"]
         self._mic_native_rate = int(dev["defaultSampleRate"])
         native_chunk = int(self._mic_native_rate * self.chunk_duration)
-        log.info(f"Mic device: {dev['name']} ({self._mic_native_rate}Hz, {self._mic_native_channels}ch)")
+        log.info(
+            f"Mic device: {dev['name']} ({self._mic_native_rate}Hz, {self._mic_native_channels}ch)"
+        )
         self._mic_stream = self._pa.open(
             format=pyaudio.paFloat32,
             channels=self._mic_native_channels,
@@ -218,11 +231,12 @@ class AudioCapture:
             self._mic_restart_event.set()
 
     def set_device(self, device_name):
-        """Change capture device at runtime. None = system default."""
+        """Change capture device at runtime. None = system default, '__disabled__' = off."""
         if device_name == self._device_name:
             return
         log.info(f"Audio device changed: {self._device_name} -> {device_name}")
         self._device_name = device_name
+        self._loopback_disabled = device_name == "__disabled__"
         if self._running:
             self._restart_event.set()
 
@@ -246,10 +260,12 @@ class AudioCapture:
         """Restart stream with new default device."""
         with self._lock:
             self._close_stream()
-            # Refresh device list
             self._pa.terminate()
             self._pa = pyaudio.PyAudio()
-            self._open_stream()
+            if not self._loopback_disabled:
+                self._open_stream()
+            else:
+                log.info("Loopback disabled (mic-only mode)")
             # Re-open mic if active
             if self._mic_device_name:
                 self._close_mic_stream()
@@ -300,49 +316,69 @@ class AudioCapture:
                 if self._device_name is None:
                     try:
                         current_default = self._query_current_default()
-                        if current_default and self._current_device_name and \
-                           current_default not in self._current_device_name:
-                            log.info(f"System default output changed: "
-                                     f"{self._current_device_name} -> {current_default}")
+                        if (
+                            current_default
+                            and self._current_device_name
+                            and current_default not in self._current_device_name
+                        ):
+                            log.info(
+                                f"System default output changed: "
+                                f"{self._current_device_name} -> {current_default}"
+                            )
                             log.info("Restarting audio capture for new device...")
                             self._restart_stream()
-                            log.info(f"Audio capture restarted on: {self._current_device_name}")
+                            log.info(
+                                f"Audio capture restarted on: {self._current_device_name}"
+                            )
                     except Exception as e:
                         log.warning(f"Device check error: {e}")
 
-            # Read loopback chunk (non-blocking)
-            native_chunk = int(self._native_rate * self.chunk_duration)
+            # Read loopback chunk or generate silence for mic-only mode
             loopback_audio = None
-            try:
-                data = None
-                with self._lock:
-                    if not self._stream:
-                        time.sleep(0.005)
-                        continue
-                    if self._stream.get_read_available() >= native_chunk:
-                        data = self._stream.read(native_chunk, exception_on_overflow=False)
-                if data is not None:
-                    loopback_audio = self._resample_to_mono(data, self._native_channels, self._native_rate)
-            except Exception as e:
-                if self._restart_event.is_set():
-                    continue
-                log.warning(f"Read error (device may have changed): {e}")
+            if self._loopback_disabled:
+                time.sleep(self.chunk_duration)
+                n_samples = int(self.sample_rate * self.chunk_duration)
+                loopback_audio = np.zeros(n_samples, dtype=np.float32)
+            else:
+                native_chunk = int(self._native_rate * self.chunk_duration)
                 try:
-                    time.sleep(0.5)
-                    self._restart_stream()
-                    log.info("Stream restarted after read error")
-                except Exception as re:
-                    log.error(f"Restart failed: {re}")
-                    time.sleep(1)
-                continue
+                    data = None
+                    with self._lock:
+                        if not self._stream:
+                            time.sleep(0.005)
+                            continue
+                        if self._stream.get_read_available() >= native_chunk:
+                            data = self._stream.read(
+                                native_chunk, exception_on_overflow=False
+                            )
+                    if data is not None:
+                        loopback_audio = self._resample_to_mono(
+                            data, self._native_channels, self._native_rate
+                        )
+                except Exception as e:
+                    if self._restart_event.is_set():
+                        continue
+                    log.warning(f"Read error (device may have changed): {e}")
+                    try:
+                        time.sleep(0.5)
+                        self._restart_stream()
+                        log.info("Stream restarted after read error")
+                    except Exception as re:
+                        log.error(f"Restart failed: {re}")
+                        time.sleep(1)
+                    continue
 
             # Drain all available mic data into buffer
             if self._mic_stream:
                 try:
                     avail = self._mic_stream.get_read_available()
                     if avail > 0:
-                        mic_data = self._mic_stream.read(avail, exception_on_overflow=False)
-                        mic_16k = self._resample_to_mono(mic_data, self._mic_native_channels, self._mic_native_rate)
+                        mic_data = self._mic_stream.read(
+                            avail, exception_on_overflow=False
+                        )
+                        mic_16k = self._resample_to_mono(
+                            mic_data, self._mic_native_channels, self._mic_native_rate
+                        )
                         self._mic_buf = np.concatenate([self._mic_buf, mic_16k])
                 except Exception as e:
                     log.warning(f"Mic read error: {e}")
@@ -361,7 +397,7 @@ class AudioCapture:
                     self._mic_buf = self._mic_buf[n:]
                 else:
                     mic_chunk = np.zeros(n, dtype=np.float32)
-                    mic_chunk[:len(self._mic_buf)] = self._mic_buf
+                    mic_chunk[: len(self._mic_buf)] = self._mic_buf
                     self._mic_buf = np.array([], dtype=np.float32)
                 mic_rms = float(np.sqrt(np.mean(mic_chunk**2)))
                 audio = loopback_audio + mic_chunk
@@ -373,7 +409,11 @@ class AudioCapture:
                 self.audio_queue.put_nowait((audio, mic_rms))
 
     def start(self):
-        self._open_stream()
+        self._loopback_disabled = self._device_name == "__disabled__"
+        if not self._loopback_disabled:
+            self._open_stream()
+        else:
+            log.info("Loopback disabled (mic-only mode)")
         if self._mic_device_name:
             try:
                 self._open_mic_stream()

@@ -1,4 +1,5 @@
 """Quick test: capture loopback audio and check if data is non-zero."""
+
 import pyaudiowpatch as pyaudio
 import numpy as np
 
@@ -19,7 +20,9 @@ for i in range(pa.get_device_count()):
     dev = pa.get_device_info_by_index(i)
     if dev.get("isLoopbackDevice", False):
         loopback = dev
-        print(f"  Loopback: [{i}] {dev['name']} ch={dev['maxInputChannels']} rate={dev['defaultSampleRate']}")
+        print(
+            f"  Loopback: [{i}] {dev['name']} ch={dev['maxInputChannels']} rate={dev['defaultSampleRate']}"
+        )
 
 if loopback is None:
     print("No loopback device found!")
@@ -48,7 +51,9 @@ for i in range(6):
     audio = np.frombuffer(data, dtype=np.float32)
     mono = audio.reshape(-1, channels).mean(axis=1) if channels > 1 else audio
     rms = np.sqrt(np.mean(mono**2))
-    print(f"  Chunk {i}: samples={len(mono)}, rms={rms:.6f}, max={np.abs(mono).max():.6f}")
+    print(
+        f"  Chunk {i}: samples={len(mono)}, rms={rms:.6f}, max={np.abs(mono).max():.6f}"
+    )
 
 stream.stop_stream()
 stream.close()

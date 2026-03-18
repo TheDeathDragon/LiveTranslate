@@ -57,6 +57,7 @@ class FunASRNanoEngine:
             return
         log.info("Downloading Qwen3-0.6B weights (one-time)...")
         from huggingface_hub import snapshot_download
+
         snapshot_download(
             "Qwen/Qwen3-0.6B",
             local_dir=qwen_dir,

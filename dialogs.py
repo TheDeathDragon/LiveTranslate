@@ -341,7 +341,9 @@ class ModelEditDialog(QDialog):
 
     def __init__(self, parent=None, model_data=None):
         super().__init__(parent)
-        self.setWindowTitle(t("dialog_edit_model") if model_data else t("dialog_add_model"))
+        self.setWindowTitle(
+            t("dialog_edit_model") if model_data else t("dialog_add_model")
+        )
         self.setMinimumWidth(450)
 
         layout = QFormLayout(self)
@@ -353,7 +355,9 @@ class ModelEditDialog(QDialog):
         self._model = QLineEdit()
 
         self._proxy_mode = QComboBox()
-        self._proxy_mode.addItems([t("proxy_none"), t("proxy_system"), t("proxy_custom")])
+        self._proxy_mode.addItems(
+            [t("proxy_none"), t("proxy_system"), t("proxy_custom")]
+        )
         self._proxy_mode.currentIndexChanged.connect(self._on_proxy_mode_changed)
         self._proxy_url = QLineEdit()
         self._proxy_url.setPlaceholderText("http://127.0.0.1:7890")

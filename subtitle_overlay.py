@@ -2,7 +2,7 @@ import ctypes
 import os
 
 import psutil
-from i18n import t
+from i18n import t, LANGUAGES
 from PyQt6.QtCore import QPoint, Qt, QTimer, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QCursor, QFont
 from PyQt6.QtWidgets import (
@@ -44,54 +44,140 @@ _BASE = DEFAULT_STYLE
 
 STYLE_PRESETS = {
     "default": dict(_BASE),
-    "transparent": {**_BASE, "preset": "transparent",
-                    "bg_opacity": 120, "header_opacity": 120, "window_opacity": 70},
-    "compact": {**_BASE, "preset": "compact",
-                "original_font_size": 9, "translation_font_size": 11},
-    "light": {**_BASE, "preset": "light",
-              "bg_color": "#e8e8f0", "bg_opacity": 230, "header_color": "#c8c8d8",
-              "header_opacity": 220, "original_color": "#333333",
-              "translation_color": "#111111", "timestamp_color": "#666688"},
-    "dracula": {**_BASE, "preset": "dracula",
-                "bg_color": "#282a36", "bg_opacity": 235, "header_color": "#44475a",
-                "header_opacity": 230, "original_color": "#f8f8f2",
-                "translation_color": "#f8f8f2", "timestamp_color": "#6272a4"},
-    "nord": {**_BASE, "preset": "nord",
-             "bg_color": "#2e3440", "bg_opacity": 235, "header_color": "#3b4252",
-             "header_opacity": 230, "original_color": "#d8dee9",
-             "translation_color": "#eceff4", "timestamp_color": "#4c566a"},
-    "monokai": {**_BASE, "preset": "monokai",
-                "bg_color": "#272822", "bg_opacity": 235, "header_color": "#3e3d32",
-                "header_opacity": 230, "original_color": "#f8f8f2",
-                "translation_color": "#f8f8f2", "timestamp_color": "#75715e"},
-    "solarized": {**_BASE, "preset": "solarized",
-                  "bg_color": "#002b36", "bg_opacity": 235, "header_color": "#073642",
-                  "header_opacity": 230, "original_color": "#839496",
-                  "translation_color": "#eee8d5", "timestamp_color": "#586e75"},
-    "gruvbox": {**_BASE, "preset": "gruvbox",
-                "bg_color": "#282828", "bg_opacity": 235, "header_color": "#3c3836",
-                "header_opacity": 230, "original_color": "#ebdbb2",
-                "translation_color": "#fbf1c7", "timestamp_color": "#928374"},
-    "tokyo_night": {**_BASE, "preset": "tokyo_night",
-                    "bg_color": "#1a1b26", "bg_opacity": 235, "header_color": "#24283b",
-                    "header_opacity": 230, "original_color": "#a9b1d6",
-                    "translation_color": "#c0caf5", "timestamp_color": "#565f89"},
-    "catppuccin": {**_BASE, "preset": "catppuccin",
-                   "bg_color": "#1e1e2e", "bg_opacity": 235, "header_color": "#313244",
-                   "header_opacity": 230, "original_color": "#cdd6f4",
-                   "translation_color": "#cdd6f4", "timestamp_color": "#6c7086"},
-    "one_dark": {**_BASE, "preset": "one_dark",
-                 "bg_color": "#282c34", "bg_opacity": 235, "header_color": "#3e4452",
-                 "header_opacity": 230, "original_color": "#abb2bf",
-                 "translation_color": "#e5c07b", "timestamp_color": "#636d83"},
-    "everforest": {**_BASE, "preset": "everforest",
-                   "bg_color": "#2d353b", "bg_opacity": 235, "header_color": "#343f44",
-                   "header_opacity": 230, "original_color": "#d3c6aa",
-                   "translation_color": "#d3c6aa", "timestamp_color": "#859289"},
-    "kanagawa": {**_BASE, "preset": "kanagawa",
-                 "bg_color": "#1f1f28", "bg_opacity": 235, "header_color": "#2a2a37",
-                 "header_opacity": 230, "original_color": "#dcd7ba",
-                 "translation_color": "#dcd7ba", "timestamp_color": "#54546d"},
+    "transparent": {
+        **_BASE,
+        "preset": "transparent",
+        "bg_opacity": 120,
+        "header_opacity": 120,
+        "window_opacity": 70,
+    },
+    "compact": {
+        **_BASE,
+        "preset": "compact",
+        "original_font_size": 9,
+        "translation_font_size": 11,
+    },
+    "light": {
+        **_BASE,
+        "preset": "light",
+        "bg_color": "#e8e8f0",
+        "bg_opacity": 230,
+        "header_color": "#c8c8d8",
+        "header_opacity": 220,
+        "original_color": "#333333",
+        "translation_color": "#111111",
+        "timestamp_color": "#666688",
+    },
+    "dracula": {
+        **_BASE,
+        "preset": "dracula",
+        "bg_color": "#282a36",
+        "bg_opacity": 235,
+        "header_color": "#44475a",
+        "header_opacity": 230,
+        "original_color": "#f8f8f2",
+        "translation_color": "#f8f8f2",
+        "timestamp_color": "#6272a4",
+    },
+    "nord": {
+        **_BASE,
+        "preset": "nord",
+        "bg_color": "#2e3440",
+        "bg_opacity": 235,
+        "header_color": "#3b4252",
+        "header_opacity": 230,
+        "original_color": "#d8dee9",
+        "translation_color": "#eceff4",
+        "timestamp_color": "#4c566a",
+    },
+    "monokai": {
+        **_BASE,
+        "preset": "monokai",
+        "bg_color": "#272822",
+        "bg_opacity": 235,
+        "header_color": "#3e3d32",
+        "header_opacity": 230,
+        "original_color": "#f8f8f2",
+        "translation_color": "#f8f8f2",
+        "timestamp_color": "#75715e",
+    },
+    "solarized": {
+        **_BASE,
+        "preset": "solarized",
+        "bg_color": "#002b36",
+        "bg_opacity": 235,
+        "header_color": "#073642",
+        "header_opacity": 230,
+        "original_color": "#839496",
+        "translation_color": "#eee8d5",
+        "timestamp_color": "#586e75",
+    },
+    "gruvbox": {
+        **_BASE,
+        "preset": "gruvbox",
+        "bg_color": "#282828",
+        "bg_opacity": 235,
+        "header_color": "#3c3836",
+        "header_opacity": 230,
+        "original_color": "#ebdbb2",
+        "translation_color": "#fbf1c7",
+        "timestamp_color": "#928374",
+    },
+    "tokyo_night": {
+        **_BASE,
+        "preset": "tokyo_night",
+        "bg_color": "#1a1b26",
+        "bg_opacity": 235,
+        "header_color": "#24283b",
+        "header_opacity": 230,
+        "original_color": "#a9b1d6",
+        "translation_color": "#c0caf5",
+        "timestamp_color": "#565f89",
+    },
+    "catppuccin": {
+        **_BASE,
+        "preset": "catppuccin",
+        "bg_color": "#1e1e2e",
+        "bg_opacity": 235,
+        "header_color": "#313244",
+        "header_opacity": 230,
+        "original_color": "#cdd6f4",
+        "translation_color": "#cdd6f4",
+        "timestamp_color": "#6c7086",
+    },
+    "one_dark": {
+        **_BASE,
+        "preset": "one_dark",
+        "bg_color": "#282c34",
+        "bg_opacity": 235,
+        "header_color": "#3e4452",
+        "header_opacity": 230,
+        "original_color": "#abb2bf",
+        "translation_color": "#e5c07b",
+        "timestamp_color": "#636d83",
+    },
+    "everforest": {
+        **_BASE,
+        "preset": "everforest",
+        "bg_color": "#2d353b",
+        "bg_opacity": 235,
+        "header_color": "#343f44",
+        "header_opacity": 230,
+        "original_color": "#d3c6aa",
+        "translation_color": "#d3c6aa",
+        "timestamp_color": "#859289",
+    },
+    "kanagawa": {
+        **_BASE,
+        "preset": "kanagawa",
+        "bg_color": "#1f1f28",
+        "bg_opacity": 235,
+        "header_color": "#2a2a37",
+        "header_opacity": 230,
+        "original_color": "#dcd7ba",
+        "translation_color": "#dcd7ba",
+        "timestamp_color": "#54546d",
+    },
 }
 
 
@@ -129,7 +215,9 @@ class ChatMessage(QWidget):
 
         s = self._current_style
         self._header_label = QLabel(self._build_header_html(s))
-        self._header_label.setFont(QFont(s["original_font_family"], s["original_font_size"]))
+        self._header_label.setFont(
+            QFont(s["original_font_family"], s["original_font_size"])
+        )
         self._header_label.setTextFormat(Qt.TextFormat.RichText)
         self._header_label.setWordWrap(True)
         self._header_label.setStyleSheet("background: transparent;")
@@ -138,7 +226,9 @@ class ChatMessage(QWidget):
         self._trans_label = QLabel(
             f'<span style="color:#999; font-style:italic;">{t("translating")}</span>'
         )
-        self._trans_label.setFont(QFont(s["translation_font_family"], s["translation_font_size"]))
+        self._trans_label.setFont(
+            QFont(s["translation_font_family"], s["translation_font_size"])
+        )
         self._trans_label.setTextFormat(Qt.TextFormat.RichText)
         self._trans_label.setWordWrap(True)
         self._trans_label.setStyleSheet("background: transparent;")
@@ -168,8 +258,12 @@ class ChatMessage(QWidget):
 
     def apply_style(self, s: dict):
         self._header_label.setText(self._build_header_html(s))
-        self._header_label.setFont(QFont(s["original_font_family"], s["original_font_size"]))
-        self._trans_label.setFont(QFont(s["translation_font_family"], s["translation_font_size"]))
+        self._header_label.setFont(
+            QFont(s["original_font_family"], s["original_font_size"])
+        )
+        self._trans_label.setFont(
+            QFont(s["translation_font_family"], s["translation_font_size"])
+        )
         if self._translated:
             self._trans_label.setText(
                 f'<span style="color:{s["translation_color"]};">&gt; {_escape(self._translated)}</span> '
@@ -563,11 +657,18 @@ class DragHandle(QWidget):
 
         self._target_lang = QComboBox()
         self._target_lang.setFixedHeight(18)
-        self._target_lang.setFixedWidth(42)
+        self._target_lang.setMinimumWidth(60)
         self._target_lang.setFont(QFont("Consolas", 8))
         self._target_lang.setStyleSheet(_COMBO_CSS)
-        self._target_lang.addItems(["zh", "en", "ja", "ko", "fr", "de", "es", "ru"])
-        self._target_lang.currentTextChanged.connect(self.target_language_changed.emit)
+        for code, native in LANGUAGES:
+            if code == "auto":
+                continue
+            self._target_lang.addItem(f"{code} - {native}", code)
+        self._target_lang.currentIndexChanged.connect(
+            lambda idx: self.target_language_changed.emit(
+                self._target_lang.currentData() or "zh"
+            )
+        )
         row2.addWidget(self._target_lang)
 
         outer.addLayout(row2)
@@ -583,7 +684,7 @@ class DragHandle(QWidget):
     ).replace("color: #aaa", "color: #ddb")
 
     def set_target_language(self, lang: str):
-        idx = self._target_lang.findText(lang)
+        idx = self._target_lang.findData(lang)
         if idx >= 0:
             self._target_lang.setCurrentIndex(idx)
 
@@ -595,8 +696,6 @@ class DragHandle(QWidget):
         if 0 <= active_index < self._model_combo.count():
             self._model_combo.setCurrentIndex(active_index)
         self._model_combo.blockSignals(False)
-
-
 
     @property
     def auto_scroll(self) -> bool:

@@ -15,6 +15,27 @@ LANGUAGE_DISPLAY = {
     "de": "German",
     "es": "Spanish",
     "ru": "Russian",
+    "pt": "Portuguese",
+    "it": "Italian",
+    "nl": "Dutch",
+    "pl": "Polish",
+    "tr": "Turkish",
+    "ar": "Arabic",
+    "th": "Thai",
+    "vi": "Vietnamese",
+    "id": "Indonesian",
+    "ms": "Malay",
+    "hi": "Hindi",
+    "uk": "Ukrainian",
+    "cs": "Czech",
+    "ro": "Romanian",
+    "el": "Greek",
+    "hu": "Hungarian",
+    "sv": "Swedish",
+    "da": "Danish",
+    "fi": "Finnish",
+    "no": "Norwegian",
+    "he": "Hebrew",
 }
 
 DEFAULT_PROMPT = (
@@ -137,7 +158,9 @@ class Translator:
         for chunk in stream:
             if time.monotonic() > deadline:
                 stream.close()
-                raise TimeoutError(f"Translation exceeded {self._timeout}s total timeout")
+                raise TimeoutError(
+                    f"Translation exceeded {self._timeout}s total timeout"
+                )
             if hasattr(chunk, "usage") and chunk.usage:
                 self._last_prompt_tokens = chunk.usage.prompt_tokens or 0
                 self._last_completion_tokens = chunk.usage.completion_tokens or 0

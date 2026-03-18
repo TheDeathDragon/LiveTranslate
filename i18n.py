@@ -37,3 +37,40 @@ def t(key: str) -> str:
 
 # Detect system language on import
 set_lang(_detect_system_lang())
+
+# Shared language list: (code, native_name)
+LANGUAGES = [
+    ("auto", None),  # display name comes from t("asr_lang_auto")
+    ("ja", "日本語"),
+    ("en", "English"),
+    ("zh", "中文"),
+    ("ko", "한국어"),
+    ("fr", "Français"),
+    ("de", "Deutsch"),
+    ("es", "Español"),
+    ("ru", "Русский"),
+    ("pt", "Português"),
+    ("it", "Italiano"),
+    ("nl", "Nederlands"),
+    ("pl", "Polski"),
+    ("tr", "Türkçe"),
+    ("ar", "العربية"),
+    ("th", "ไทย"),
+    ("vi", "Tiếng Việt"),
+    ("id", "Bahasa Indonesia"),
+    ("ms", "Bahasa Melayu"),
+    ("hi", "हिन्दी"),
+    ("uk", "Українська"),
+    ("cs", "Čeština"),
+    ("ro", "Română"),
+    ("el", "Ελληνικά"),
+    ("hu", "Magyar"),
+    ("sv", "Svenska"),
+    ("da", "Dansk"),
+    ("fi", "Suomi"),
+    ("no", "Norsk"),
+    ("he", "עברית"),
+]
+
+# Common languages shown directly in tray menu (no submenu)
+COMMON_LANG_CODES = {"auto", "ja", "en", "zh", "ko", "fr", "de", "es", "ru"}

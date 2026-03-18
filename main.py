@@ -29,6 +29,7 @@ apply_cache_env()
 # Qwen3-ASR uses onnxruntime-directml (libomp140.dll) which conflicts with
 # PyTorch's libiomp5md.dll. Allow coexistence since they don't run concurrently.
 import os
+
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 # torch must be imported before PyQt6 to avoid DLL conflicts on Windows
@@ -40,7 +41,7 @@ from asr_engine import ASREngine
 from translator import Translator
 
 from PyQt6.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QDialog, QMessageBox
-from PyQt6.QtGui import QAction, QIcon, QPixmap, QPainter, QColor, QFont
+from PyQt6.QtGui import QAction, QActionGroup, QIcon, QPixmap, QPainter, QColor, QFont
 from PyQt6.QtCore import QTimer, Qt
 
 from subtitle_overlay import SubtitleOverlay
@@ -55,7 +56,7 @@ from dialogs import (
     ModelDownloadDialog,
     _ModelLoadDialog,
 )
-from i18n import t, set_lang
+from i18n import t, set_lang, LANGUAGES, COMMON_LANG_CODES
 
 
 def setup_logging():
@@ -74,9 +75,23 @@ def setup_logging():
 
     logging.basicConfig(level=logging.DEBUG, handlers=[file_handler, console_handler])
 
-    for noisy in ("httpcore", "httpx", "openai", "filelock", "huggingface_hub"):
+    for noisy in (
+        "httpcore",
+        "httpx",
+        "openai",
+        "filelock",
+        "huggingface_hub",
+        "funasr",
+        "modelscope",
+        "onnxruntime",
+    ):
         logging.getLogger(noisy).setLevel(logging.WARNING)
+
     logging.info(f"Log file: {log_file}")
+
+    # FunASR/ModelScope spam the root logger; suppress after our own init log
+    logging.getLogger().setLevel(logging.WARNING)
+    logging.getLogger("LiveTrans").setLevel(logging.DEBUG)
 
     _logger = logging.getLogger("LiveTrans")
 
@@ -196,9 +211,14 @@ class LiveTransApp:
                 if result is not False:
                     log.info(f"ASR device migrated: {old_device} -> {new_device}")
                     if self._overlay:
-                        display_name = ASR_DISPLAY_NAMES.get(self._asr_type, self._asr_type)
-                        self._overlay.update_asr_device(f"{display_name} [{new_device}]")
+                        display_name = ASR_DISPLAY_NAMES.get(
+                            self._asr_type, self._asr_type
+                        )
+                        self._overlay.update_asr_device(
+                            f"{display_name} [{new_device}]"
+                        )
                     import gc
+
                     gc.collect()
                     try:
                         torch.cuda.empty_cache()
@@ -284,7 +304,9 @@ class LiveTransApp:
 
         model_size = self._config["asr"]["model_size"]
         if self._panel:
-            model_size = self._panel.get_settings().get("whisper_model_size", model_size)
+            model_size = self._panel.get_settings().get(
+                "whisper_model_size", model_size
+            )
         cached = is_asr_cached(engine_type, model_size, hub)
         display_name = ASR_DISPLAY_NAMES.get(engine_type, engine_type)
         if engine_type == "whisper":
@@ -321,7 +343,9 @@ class LiveTransApp:
             nonlocal old_engine
             try:
                 if old_engine is not None:
-                    log.info(f"Releasing old ASR engine: {old_engine.__class__.__name__}")
+                    log.info(
+                        f"Releasing old ASR engine: {old_engine.__class__.__name__}"
+                    )
                     if hasattr(old_engine, "unload"):
                         old_engine.unload()
                     old_engine = None
@@ -385,7 +409,9 @@ class LiveTransApp:
 
         if load_error[0]:
             QMessageBox.warning(
-                parent, t("error_title"), t("error_load_asr").format(error=load_error[0])
+                parent,
+                t("error_title"),
+                t("error_load_asr").format(error=load_error[0]),
             )
             # Old engine was already released; mark ASR as unavailable
             self._asr_type = None
@@ -427,6 +453,7 @@ class LiveTransApp:
     def start(self):
         if self._running:
             return
+        self._tl_executor = ThreadPoolExecutor(max_workers=2)
         self._running = True
         self._paused = False
         self._audio.start()
@@ -483,13 +510,17 @@ class LiveTransApp:
         original_text = result["text"].strip()
         # Skip empty or punctuation-only ASR results
         if not original_text or not any(c.isalnum() for c in original_text):
-            log.debug(f"ASR returned empty/punctuation-only, skipping: '{result['text']}'")
+            log.debug(
+                f"ASR returned empty/punctuation-only, skipping: '{result['text']}'"
+            )
             return
 
         # Skip suspiciously short text from long segments (likely noise)
         alnum_chars = sum(1 for c in original_text if c.isalnum())
         if seg_len >= 2.0 and alnum_chars <= 3:
-            log.debug(f"Noise filter: {seg_len:.1f}s segment produced only '{original_text}', skipping")
+            log.debug(
+                f"Noise filter: {seg_len:.1f}s segment produced only '{original_text}', skipping"
+            )
             return
 
         self._asr_count += 1
@@ -510,17 +541,25 @@ class LiveTransApp:
             if self._overlay:
                 self._overlay.update_translation(msg_id, "", 0)
                 self._overlay.update_stats(
-                    self._asr_count, self._translate_count,
-                    self._total_prompt_tokens, self._total_completion_tokens,
+                    self._asr_count,
+                    self._translate_count,
+                    self._total_prompt_tokens,
+                    self._total_completion_tokens,
                 )
         else:
-            self._tl_executor.submit(
-                self._translate_async, msg_id, original_text, source_lang
-            )
+            try:
+                self._tl_executor.submit(
+                    self._translate_async, msg_id, original_text, source_lang
+                )
+            except RuntimeError:
+                log.warning("Translation executor shut down, skipping")
 
     def _pipeline_loop(self):
         silence_chunk = np.zeros(
-            int(self._config["audio"]["sample_rate"] * self._config["audio"]["chunk_duration"]),
+            int(
+                self._config["audio"]["sample_rate"]
+                * self._config["audio"]["chunk_duration"]
+            ),
             dtype=np.float32,
         )
         while self._running:
@@ -560,18 +599,24 @@ def main():
     setup_logging()
     log.info("LiveTrans starting...")
     config = load_config()
-    log.info(
-        f"Config loaded: ASR={config['asr']['model_size']}, "
-        f"API={config['translation']['api_base']}, "
-        f"Model={config['translation']['model']}"
-    )
-
     saved = _load_saved_settings()
+
+    # Log actual effective config
+    _asr_eng = (saved or {}).get("asr_engine", "whisper")
+    _active_idx = (saved or {}).get("active_model", 0)
+    _models = (saved or {}).get("models", [])
+    if 0 <= _active_idx < len(_models):
+        _m = _models[_active_idx]
+        _model_info = f"{_m.get('name', '?')} ({_m.get('model', '?')})"
+    else:
+        _model_info = f"{config['translation']['model']} (default)"
+    log.info(f"Config loaded: ASR={_asr_eng}, Translator={_model_info}")
 
     # Apply UI language before creating any widgets
     if saved and saved.get("ui_lang"):
         set_lang(saved["ui_lang"])
 
+    os.environ["QT_LOGGING_RULES"] = "qt.text.font.db=false"
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
     _app_icon = create_app_icon()
@@ -630,30 +675,60 @@ def main():
     tray.setIcon(_app_icon)
 
     menu = QMenu()
-    start_action = QAction(t("tray_start"))
-    stop_action = QAction(t("tray_stop"))
-    log_action = QAction(t("tray_show_log"))
-    panel_action = QAction(t("tray_show_panel"))
-    quit_action = QAction(t("quit"))
+
+    # --- Pause / Resume toggle ---
+    pause_action = QAction(t("tray_pause"))
+    _is_running = [True]  # mutable for closure
 
     def on_start():
         try:
             live_trans.start()
             overlay.set_running(True)
+            _is_running[0] = True
+            pause_action.setText(t("tray_pause"))
         except Exception as e:
             log.error(f"Start error: {e}", exc_info=True)
-
-    def on_stop():
-        live_trans.stop()
-        overlay.set_running(False)
 
     def on_pause():
         live_trans.pause()
         overlay.set_running(False)
+        _is_running[0] = False
+        pause_action.setText(t("tray_resume"))
 
     def on_resume():
         live_trans.resume()
         overlay.set_running(True)
+        _is_running[0] = True
+        pause_action.setText(t("tray_pause"))
+
+    def on_toggle_pause():
+        if _is_running[0]:
+            on_pause()
+        else:
+            on_resume()
+
+    pause_action.triggered.connect(on_toggle_pause)
+    menu.addAction(pause_action)
+    menu.addSeparator()
+
+    # --- Show/hide overlay ---
+    overlay_toggle_action = QAction(t("tray_hide_overlay"))
+
+    def on_toggle_overlay():
+        if overlay.isVisible():
+            overlay.hide()
+            overlay_toggle_action.setText(t("tray_show_overlay"))
+        else:
+            overlay.show()
+            overlay.raise_()
+            overlay_toggle_action.setText(t("tray_hide_overlay"))
+
+    overlay_toggle_action.triggered.connect(on_toggle_overlay)
+    menu.addAction(overlay_toggle_action)
+
+    # --- Show log / panel ---
+    log_action = QAction(t("tray_show_log"))
+    panel_action = QAction(t("tray_show_panel"))
 
     def on_toggle_log():
         if log_window.isVisible():
@@ -669,14 +744,82 @@ def main():
             panel.show()
             panel.raise_()
 
-    def on_quit():
-        live_trans.stop()
-        app.quit()
-
-    start_action.triggered.connect(on_start)
-    stop_action.triggered.connect(on_stop)
     log_action.triggered.connect(on_toggle_log)
     panel_action.triggered.connect(on_toggle_panel)
+    menu.addAction(log_action)
+    menu.addAction(panel_action)
+    menu.addSeparator()
+
+    # --- Overlay submenu (click-through, topmost, auto-scroll, taskbar) ---
+    overlay_menu = QMenu(t("tray_menu_overlay"))
+
+    ct_action = QAction(t("click_through"), checkable=True)
+    topmost_action = QAction(t("top_most"), checkable=True)
+    topmost_action.setChecked(True)
+    autoscroll_action = QAction(t("auto_scroll"), checkable=True)
+    autoscroll_action.setChecked(True)
+    taskbar_action = QAction(t("taskbar"), checkable=True)
+
+    # Tray → overlay sync
+    ct_action.toggled.connect(lambda v: overlay._handle._ct_check.setChecked(v))
+    topmost_action.toggled.connect(
+        lambda v: overlay._handle._topmost_check.setChecked(v)
+    )
+    autoscroll_action.toggled.connect(
+        lambda v: overlay._handle._auto_scroll.setChecked(v)
+    )
+    taskbar_action.toggled.connect(
+        lambda v: overlay._handle._taskbar_check.setChecked(v)
+    )
+
+    # Overlay → tray sync
+    overlay._handle.click_through_toggled.connect(lambda v: ct_action.setChecked(v))
+    overlay._handle.topmost_toggled.connect(lambda v: topmost_action.setChecked(v))
+    overlay._handle.auto_scroll_toggled.connect(
+        lambda v: autoscroll_action.setChecked(v)
+    )
+    overlay._handle.taskbar_toggled.connect(lambda v: taskbar_action.setChecked(v))
+
+    overlay_menu.addAction(ct_action)
+    overlay_menu.addAction(topmost_action)
+    overlay_menu.addAction(autoscroll_action)
+    overlay_menu.addAction(taskbar_action)
+    menu.addMenu(overlay_menu)
+
+    # --- Model submenu ---
+    model_menu = QMenu(t("tray_menu_model"))
+    model_action_group = QActionGroup(model_menu)
+    model_action_group.setExclusive(True)
+
+    def _rebuild_model_menu():
+        for a in model_action_group.actions():
+            model_action_group.removeAction(a)
+        model_menu.clear()
+        settings = panel.get_settings()
+        models = settings.get("models", [])
+        active = settings.get("active_model", 0)
+        for i, m in enumerate(models):
+            name = m.get("name", m.get("model", "?"))
+            action = QAction(name, checkable=True)
+            if i == active:
+                action.setChecked(True)
+            model_action_group.addAction(action)
+            action.triggered.connect(lambda checked, idx=i: _on_tray_model_switch(idx))
+            model_menu.addAction(action)
+
+    def _on_tray_model_switch(index):
+        models = panel.get_settings().get("models", [])
+        if 0 <= index < len(models):
+            from control_panel import _save_settings
+
+            settings = panel.get_settings()
+            settings["active_model"] = index
+            panel._current_settings["active_model"] = index
+            _save_settings(settings)
+            panel._refresh_model_list()
+            live_trans._on_model_changed(models[index])
+            overlay.set_models(models, index)
+
     def on_overlay_model_switch(index):
         models = panel.get_settings().get("models", [])
         if 0 <= index < len(models):
@@ -688,22 +831,115 @@ def main():
             _save_settings(settings)
             panel._refresh_model_list()
             live_trans._on_model_changed(models[index])
+        _rebuild_model_menu()
 
+    model_menu.aboutToShow.connect(_rebuild_model_menu)
+    menu.addMenu(model_menu)
+
+    # --- Target language submenu ---
+    lang_menu = QMenu(t("tray_menu_target_lang"))
+    lang_action_group = QActionGroup(lang_menu)
+    lang_action_group.setExclusive(True)
+    _lang_actions = {}
+    lang_more_menu = QMenu(t("tray_more_langs"))
+
+    for code, native in LANGUAGES:
+        if code == "auto":
+            continue
+        action = QAction(f"{code} - {native}", checkable=True)
+        lang_action_group.addAction(action)
+        action.triggered.connect(lambda checked, lc=code: _on_tray_lang_switch(lc))
+        if code in COMMON_LANG_CODES:
+            lang_menu.addAction(action)
+        else:
+            lang_more_menu.addAction(action)
+        _lang_actions[code] = action
+
+    lang_menu.addMenu(lang_more_menu)
+
+    current_target = panel.get_settings().get("target_language", "zh")
+    if current_target in _lang_actions:
+        _lang_actions[current_target].setChecked(True)
+
+    def _on_tray_lang_switch(lang_code):
+        overlay.set_target_language(lang_code)
+        live_trans._on_target_language_changed(lang_code)
+        from control_panel import _save_settings
+
+        settings = panel.get_settings()
+        settings["target_language"] = lang_code
+        panel._current_settings["target_language"] = lang_code
+        _save_settings(settings)
+
+    # Overlay → tray lang sync
+    def _on_overlay_lang_changed(lang_code):
+        if lang_code in _lang_actions:
+            _lang_actions[lang_code].setChecked(True)
+
+    overlay.target_language_changed.connect(_on_overlay_lang_changed)
+
+    menu.addMenu(lang_menu)
+
+    # --- ASR language hint submenu ---
+    asr_lang_menu = QMenu(t("tray_menu_asr_lang"))
+    asr_lang_action_group = QActionGroup(asr_lang_menu)
+    asr_lang_action_group.setExclusive(True)
+    _asr_lang_actions = {}
+    asr_more_menu = QMenu(t("tray_more_langs"))
+
+    for code, native in LANGUAGES:
+        label = t("asr_lang_auto") if code == "auto" else native
+        action = QAction(f"{code} - {label}", checkable=True)
+        asr_lang_action_group.addAction(action)
+        action.triggered.connect(lambda checked, c=code: _on_tray_asr_lang(c))
+        if code in COMMON_LANG_CODES:
+            asr_lang_menu.addAction(action)
+        else:
+            asr_more_menu.addAction(action)
+        _asr_lang_actions[code] = action
+
+    asr_lang_menu.addMenu(asr_more_menu)
+
+    current_asr_lang = panel.get_settings().get("asr_language", "auto")
+    if current_asr_lang in _asr_lang_actions:
+        _asr_lang_actions[current_asr_lang].setChecked(True)
+
+    def _on_tray_asr_lang(code):
+        from control_panel import _save_settings
+
+        if live_trans._asr:
+            live_trans._asr.set_language(code)
+        settings = panel.get_settings()
+        settings["asr_language"] = code
+        panel._current_settings["asr_language"] = code
+        _save_settings(settings)
+        # Sync control panel combo
+        idx = panel._asr_lang.findData(code)
+        if idx >= 0:
+            panel._asr_lang.blockSignals(True)
+            panel._asr_lang.setCurrentIndex(idx)
+            panel._asr_lang.blockSignals(False)
+
+    menu.addMenu(asr_lang_menu)
+    menu.addSeparator()
+
+    # --- Quit ---
+    quit_action = QAction(t("quit"))
+
+    def on_quit():
+        live_trans.stop()
+        app.quit()
+
+    quit_action.triggered.connect(on_quit)
+    menu.addAction(quit_action)
+
+    # --- Connect overlay signals ---
     overlay.settings_requested.connect(on_toggle_panel)
     overlay.target_language_changed.connect(live_trans._on_target_language_changed)
     overlay.model_switch_requested.connect(on_overlay_model_switch)
     overlay.start_requested.connect(on_resume)
     overlay.stop_requested.connect(on_pause)
     overlay.quit_requested.connect(on_quit)
-    quit_action.triggered.connect(on_quit)
-
-    menu.addAction(start_action)
-    menu.addAction(stop_action)
-    menu.addSeparator()
-    menu.addAction(log_action)
-    menu.addAction(panel_action)
-    menu.addSeparator()
-    menu.addAction(quit_action)
 
     tray.setContextMenu(menu)
     tray.show()

@@ -53,9 +53,9 @@ class VADProcessor:
         # Progressive silence: shorter threshold when buffer is long
         self._progressive_tiers = [
             # (buffer_seconds, silence_multiplier)
-            (3.0, 1.0),   # < 3s: use full silence_limit
-            (6.0, 0.5),   # 3-6s: use half silence_limit
-            (10.0, 0.25), # 6-10s: use quarter silence_limit
+            (3.0, 1.0),  # < 3s: use full silence_limit
+            (6.0, 0.5),  # 3-6s: use half silence_limit
+            (10.0, 0.25),  # 6-10s: use quarter silence_limit
         ]
 
         # Adaptive silence tracking: recent pause durations (seconds)
@@ -79,7 +79,9 @@ class VADProcessor:
         target = max(self._adaptive_min, min(self._adaptive_max, p75 * 1.2))
         new_limit = self._seconds_to_chunks(target)
         if new_limit != self._silence_limit:
-            log.debug(f"Adaptive silence: {target:.2f}s ({new_limit} chunks), P75={p75:.2f}s")
+            log.debug(
+                f"Adaptive silence: {target:.2f}s ({new_limit} chunks), P75={p75:.2f}s"
+            )
             self._silence_limit = new_limit
 
     def update_settings(self, settings: dict):
@@ -300,7 +302,9 @@ class VADProcessor:
         # Speech density check: discard segments where most chunks are below threshold
         if len(self._confidence_history) >= 4:
             effective_threshold = self.threshold if self.mode == "silero" else 0.5
-            voiced = sum(1 for c in self._confidence_history if c >= effective_threshold)
+            voiced = sum(
+                1 for c in self._confidence_history if c >= effective_threshold
+            )
             density = voiced / len(self._confidence_history)
             if density < 0.25:
                 dur = self._speech_samples / self.sample_rate
