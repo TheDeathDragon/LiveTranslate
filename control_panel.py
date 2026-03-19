@@ -468,24 +468,42 @@ class ControlPanel(QWidget):
         prompt_group = QGroupBox(t("group_system_prompt"))
         prompt_layout = QVBoxLayout(prompt_group)
 
-        from translator import DEFAULT_PROMPT
+        from translator import DEFAULT_PROMPT, PROMPT_PRESETS
 
+        # Preset selector
+        preset_row = QHBoxLayout()
+        preset_row.addWidget(QLabel(t("label_prompt_preset")))
+        self._prompt_preset = QComboBox()
+        self._prompt_preset.addItem(t("prompt_daily"), "daily")
+        self._prompt_preset.addItem(t("prompt_esports"), "esports")
+        self._prompt_preset.addItem(t("prompt_anime"), "anime")
+        self._prompt_preset.addItem(t("prompt_custom"), "custom")
+
+        current_prompt = s.get("system_prompt", DEFAULT_PROMPT)
+        preset_idx = 3  # default to custom
+        for i, key in enumerate(["daily", "esports", "anime"]):
+            if current_prompt.strip() == PROMPT_PRESETS[key].strip():
+                preset_idx = i
+                break
+        if current_prompt.strip() == DEFAULT_PROMPT.strip():
+            preset_idx = 0
+        self._prompt_preset.setCurrentIndex(preset_idx)
+        self._prompt_preset.currentIndexChanged.connect(self._on_prompt_preset_changed)
+        preset_row.addWidget(self._prompt_preset, 1)
+        prompt_layout.addLayout(preset_row)
+
+        # Prompt text editor
         self._prompt_edit = QTextEdit()
         self._prompt_edit.setFont(QFont("Consolas", 9))
         self._prompt_edit.setMaximumHeight(100)
-        self._prompt_edit.setPlainText(s.get("system_prompt", DEFAULT_PROMPT))
+        self._prompt_edit.setPlainText(current_prompt)
         prompt_layout.addWidget(self._prompt_edit)
 
         prompt_btn_row = QHBoxLayout()
-        reset_prompt_btn = QPushButton(t("btn_restore_default"))
-        reset_prompt_btn.clicked.connect(
-            lambda: self._prompt_edit.setPlainText(DEFAULT_PROMPT)
-        )
-        prompt_btn_row.addWidget(reset_prompt_btn)
+        prompt_btn_row.addStretch()
         apply_prompt_btn = QPushButton(t("btn_apply_prompt"))
         apply_prompt_btn.clicked.connect(self._apply_prompt)
         prompt_btn_row.addWidget(apply_prompt_btn)
-        prompt_btn_row.addStretch()
         prompt_layout.addLayout(prompt_btn_row)
         layout.addWidget(prompt_group)
 
@@ -1180,6 +1198,15 @@ class ControlPanel(QWidget):
         self._apply_settings()
         _save_settings(self._current_settings)
 
+    def _on_prompt_preset_changed(self, index):
+        from translator import DEFAULT_PROMPT, PROMPT_PRESETS
+        key = self._prompt_preset.itemData(index)
+        if key == "custom":
+            return
+        prompt = PROMPT_PRESETS.get(key, DEFAULT_PROMPT)
+        self._prompt_edit.setPlainText(prompt)
+        self._apply_prompt()
+
     def _apply_prompt(self):
         text = self._prompt_edit.toPlainText().strip()
         if text:
@@ -1189,6 +1216,16 @@ class ControlPanel(QWidget):
                 self.model_changed.emit(active)
             _save_settings(self._current_settings)
             log.info("System prompt updated")
+            # Update preset combo to reflect current state
+            from translator import PROMPT_PRESETS
+            self._prompt_preset.blockSignals(True)
+            matched = 3  # custom
+            for i, key in enumerate(["daily", "esports", "anime"]):
+                if text.strip() == PROMPT_PRESETS[key].strip():
+                    matched = i
+                    break
+            self._prompt_preset.setCurrentIndex(matched)
+            self._prompt_preset.blockSignals(False)
 
     def _apply_settings(self):
         self._current_settings["asr_language"] = self._get_asr_lang_code()
