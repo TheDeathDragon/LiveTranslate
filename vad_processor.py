@@ -40,6 +40,7 @@ class VADProcessor:
         self._speech_samples = 0
         self._is_speaking = False
         self._silence_counter = 0
+        self._was_trimmed = False  # True after trim_front (interim ASR active)
 
         # Pre-speech ring buffer: capture onset consonants before VAD triggers
         self._pre_speech_chunks = 3  # ~96ms at 32ms/chunk
@@ -149,13 +150,6 @@ class VADProcessor:
         effective_threshold = self.threshold if self.mode == "silero" else 0.5
         eff_silence_limit = self._get_effective_silence_limit()
 
-        log.debug(
-            f"VAD conf={confidence:.3f} ({self.mode}), speaking={self._is_speaking}, "
-            f"buf={self._speech_samples / self.sample_rate:.1f}s, "
-            f"silence_cnt={self._silence_counter}, limit={eff_silence_limit} "
-            f"(base={self._silence_limit})"
-        )
-
         if confidence >= effective_threshold:
             # Record pause duration for adaptive mode
             if self._is_speaking and self._silence_counter > 0:
@@ -196,8 +190,22 @@ class VADProcessor:
         if self._is_speaking and self._silence_counter >= eff_silence_limit:
             if self._speech_samples >= self.min_speech_samples:
                 return self._flush_segment()
+            elif self._was_trimmed:
+                # Interim ASR trimmed the buffer; return remainder instead of dropping
+                log.debug(
+                    f"Short segment after trim ({self._speech_samples / self.sample_rate:.1f}s), "
+                    f"force flushing for interim final"
+                )
+                return self.force_flush()
             else:
-                self._reset()
+                # Too short — keep buffer, merge with next speech onset
+                log.debug(
+                    f"Short segment {self._speech_samples / self.sample_rate:.1f}s "
+                    f"< min {self.min_speech_samples / self.sample_rate:.1f}s, "
+                    f"keeping for merge"
+                )
+                self._is_speaking = False
+                self._silence_counter = 0
                 return None
 
         return None
@@ -324,6 +332,43 @@ class VADProcessor:
         self._speech_samples = 0
         self._is_speaking = False
         self._silence_counter = 0
+        self._was_trimmed = False
+
+    def peek_buffer(self):
+        """Read current speech buffer without flushing. Returns (audio, duration) or None."""
+        if not self._speech_buffer or not self._is_speaking:
+            return None
+        audio = np.concatenate(self._speech_buffer)
+        duration = self._speech_samples / self.sample_rate
+        return audio, duration
+
+    def trim_front(self, n_samples: int):
+        """Remove first n_samples from the speech buffer."""
+        if n_samples <= 0:
+            return
+        removed = 0
+        while self._speech_buffer and removed < n_samples:
+            chunk = self._speech_buffer[0]
+            if removed + len(chunk) <= n_samples:
+                self._speech_buffer.pop(0)
+                self._confidence_history.pop(0)
+                removed += len(chunk)
+            else:
+                # Partial trim of first chunk
+                keep = removed + len(chunk) - n_samples
+                self._speech_buffer[0] = chunk[-keep:]
+                removed = n_samples
+        self._speech_samples = sum(len(b) for b in self._speech_buffer)
+        self._was_trimmed = True
+        log.debug(f"trim_front: removed {removed} samples, remaining {self._speech_samples / self.sample_rate:.2f}s")
+
+    def force_flush(self):
+        """Flush buffer regardless of min_speech_samples."""
+        if not self._speech_buffer:
+            return None
+        segment = np.concatenate(self._speech_buffer)
+        self._reset()
+        return segment
 
     def flush(self):
         if self._speech_samples >= self.min_speech_samples:

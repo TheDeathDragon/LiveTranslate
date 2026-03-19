@@ -45,14 +45,15 @@ class ASREngine:
     def unload(self):
         self._model = None
 
-    def transcribe(self, audio: np.ndarray) -> dict | None:
+    def transcribe(self, audio: np.ndarray, word_timestamps: bool = False) -> dict | None:
         """Transcribe audio segment.
 
         Args:
             audio: float32 numpy array, 16kHz mono
+            word_timestamps: if True, include per-word timestamps in result
 
         Returns:
-            dict with 'text', 'language', 'language_name' or None if no speech detected.
+            dict with 'text', 'language', 'language_name' (and 'words' if word_timestamps) or None.
         """
         segments, info = self._model.transcribe(
             audio,
@@ -60,19 +61,27 @@ class ASREngine:
             beam_size=5,
             vad_filter=True,
             vad_parameters=dict(min_silence_duration_ms=500),
+            word_timestamps=word_timestamps,
         )
 
         text_parts = []
+        words = []
         for seg in segments:
             text_parts.append(seg.text.strip())
+            if word_timestamps and seg.words:
+                for w in seg.words:
+                    words.append({"word": w.word, "start": w.start, "end": w.end})
 
         full_text = " ".join(text_parts).strip()
         if not full_text:
             return None
 
         detected_lang = info.language
-        return {
+        result = {
             "text": full_text,
             "language": detected_lang,
             "language_name": LANGUAGE_NAMES.get(detected_lang, detected_lang),
         }
+        if word_timestamps and words:
+            result["words"] = words
+        return result

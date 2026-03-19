@@ -45,11 +45,13 @@ from PyQt6.QtGui import QAction, QActionGroup, QIcon, QPixmap, QPainter, QColor,
 from PyQt6.QtCore import QTimer, Qt
 
 from subtitle_overlay import SubtitleOverlay
+from subtitle_window import SubtitleWindow
 from log_window import LogWindow
 from control_panel import (
     ControlPanel,
     SETTINGS_FILE,
     _load_saved_settings,
+    _save_settings,
 )
 from dialogs import (
     SetupWizardDialog,
@@ -172,18 +174,35 @@ class LiveTransApp:
             system_prompt=config["translation"].get("system_prompt"),
         )
         self._overlay = None
+        self._subwin = None
         self._panel = None
         self._pipeline_thread = None
-        self._tl_executor = ThreadPoolExecutor(max_workers=2)
+        self._tl_executor = ThreadPoolExecutor(max_workers=8)
 
         self._asr_count = 0
         self._translate_count = 0
         self._total_prompt_tokens = 0
         self._total_completion_tokens = 0
+        self._input_price = 0.0
+        self._output_price = 0.0
         self._msg_id = 0
+        self._last_original = ""
+        self._last_msg_id = 0
+
+        # Incremental ASR state
+        self._incremental_enabled = True
+        self._interim_interval = 2.0
+        self._interim_pending = ""
+        self._interim_active = False
+        self._last_interim_samples = 0
+        self._last_interim_check_time = 0.0
+        self._interim_committed_tail = ""
 
     def set_overlay(self, overlay: SubtitleOverlay):
         self._overlay = overlay
+
+    def set_subtitle_window(self, subwin: SubtitleWindow):
+        self._subwin = subwin
 
     def set_panel(self, panel: ControlPanel):
         self._panel = panel
@@ -245,6 +264,10 @@ class LiveTransApp:
                     self._overlay.update_monitor(0.0, 0.0)
         if "mic_device" in settings:
             self._audio.set_mic_device(settings["mic_device"])
+        if "incremental_asr" in settings:
+            self._incremental_enabled = settings["incremental_asr"]
+        if "interim_interval" in settings:
+            self._interim_interval = settings["interim_interval"]
         if "target_language" in settings:
             self._target_language = settings["target_language"]
             if self._overlay:
@@ -286,14 +309,23 @@ class LiveTransApp:
             system_prompt=prompt,
             proxy=model_config.get("proxy", "none"),
             no_system_role=model_config.get("no_system_role", False),
+            no_think=model_config.get("no_think", False),
             timeout=timeout,
         )
+        self._input_price = model_config.get("input_price", 0)
+        self._output_price = model_config.get("output_price", 0)
 
     def _switch_asr_engine(self, engine_type: str):
         if engine_type == self._asr_type:
             return
         log.info(f"Switching ASR engine: {self._asr_type} -> {engine_type}")
         self._asr_ready = False
+        # Reset interim state
+        self._interim_active = False
+        self._interim_pending = ""
+        self._last_interim_samples = 0
+        self._last_interim_check_time = 0.0
+        self._interim_committed_tail = ""
         # Flush and reset VAD to stop accumulating audio during engine switch
         self._vad.flush()
         self._vad._reset()
@@ -427,7 +459,14 @@ class LiveTransApp:
             self._overlay.update_asr_device(f"{display_name} [{device}]")
         log.info(f"ASR engine ready: {engine_type} on {device}")
 
-    def _translate_async(self, msg_id, text, source_lang):
+    def _compute_cost(self):
+        if self._input_price > 0 or self._output_price > 0:
+            return (self._total_prompt_tokens * self._input_price +
+                    self._total_completion_tokens * self._output_price) / 1_000_000
+        return 0.0
+
+    def _translate_async(self, msg_id, text, source_lang, extra_langs=None):
+        """Translate text and update UI. If extra_langs is provided, also translate for subtitle window."""
         try:
             tl_start = time.perf_counter()
             translated = self._translator.translate(text, source_lang)
@@ -436,6 +475,7 @@ class LiveTransApp:
             pt, ct = self._translator.last_usage
             self._total_prompt_tokens += pt
             self._total_completion_tokens += ct
+            cost = self._compute_cost()
             log.info(f"Translate ({tl_ms:.0f}ms): {translated}")
             if self._overlay:
                 self._overlay.update_translation(msg_id, translated, tl_ms)
@@ -444,16 +484,50 @@ class LiveTransApp:
                     self._translate_count,
                     self._total_prompt_tokens,
                     self._total_completion_tokens,
+                    cost,
                 )
+            if self._subwin and self._subwin.isVisible() and translated:
+                tl_dict = {self._target_language: translated}
+                if extra_langs:
+                    self._translate_extra_langs(text, source_lang, extra_langs, tl_dict)
+                self._subwin.update_text(text, tl_dict)
         except Exception as e:
             log.error(f"Translate error: {e}", exc_info=True)
             if self._overlay:
                 self._overlay.update_translation(msg_id, f"[error: {e}]", 0)
 
+    def _translate_extra_langs(self, text, source_lang, extra_langs, tl_dict):
+        """Translate into additional languages for subtitle window (parallel)."""
+        from concurrent.futures import as_completed
+
+        def _do_translate(lang):
+            translator = self._translator.with_target_language(lang)
+            return lang, translator.translate(text, source_lang)
+
+        futures = []
+        for lang in extra_langs:
+            futures.append(self._tl_executor.submit(_do_translate, lang))
+
+        for future in as_completed(futures):
+            try:
+                lang, result = future.result()
+                tl_dict[lang] = result
+                log.info(f"Extra translate [{lang}]: {result}")
+            except Exception as e:
+                log.error(f"Extra translate error: {e}", exc_info=True)
+
+    def _translate_subwin_only(self, text, source_lang, extra_langs):
+        """Translate only for subtitle window when primary target == source language."""
+        tl_dict = {self._target_language: text}  # same language, use original
+        self._translate_extra_langs(text, source_lang, extra_langs, tl_dict)
+        if self._subwin and self._subwin.isVisible():
+            self._subwin.update_text(text, tl_dict)
+
     def start(self):
         if self._running:
             return
-        self._tl_executor = ThreadPoolExecutor(max_workers=2)
+        n = len(self._subwin.get_target_languages()) if self._subwin else 1
+        self._tl_executor = ThreadPoolExecutor(max_workers=max(8, n + 1))
         self._running = True
         self._paused = False
         self._audio.start()
@@ -471,14 +545,29 @@ class LiveTransApp:
             self._pipeline_thread.join(timeout=3)
             self._pipeline_thread = None
         # Flush remaining VAD buffer after pipeline thread is done
-        remaining = self._vad.flush()
-        if remaining is not None and self._asr_ready:
-            self._process_segment(remaining)
+        if self._interim_active:
+            remaining = self._vad.force_flush()
+            if remaining is not None and self._asr_ready:
+                self._process_interim_final(remaining)
+        else:
+            remaining = self._vad.flush()
+            if remaining is not None and self._asr_ready:
+                self._process_segment(remaining)
+        self._interim_active = False
+        self._interim_pending = ""
+        self._last_interim_samples = 0
+        self._last_interim_check_time = 0.0
+        self._interim_committed_tail = ""
         self._tl_executor.shutdown(wait=False)
         log.info("Pipeline stopped")
 
     def pause(self):
         self._paused = True
+        self._interim_active = False
+        self._interim_pending = ""
+        self._last_interim_samples = 0
+        self._last_interim_check_time = 0.0
+        self._interim_committed_tail = ""
         if self._overlay:
             self._overlay.update_monitor(0.0, 0.0)
         log.info("Pipeline paused")
@@ -523,10 +612,18 @@ class LiveTransApp:
             )
             return
 
+        source_lang = result["language"]
+        asr_lang_setting = self._panel.get_settings().get("asr_language", "auto") if self._panel else "auto"
+        if asr_lang_setting != "auto" and source_lang != asr_lang_setting:
+            log.info(
+                f"Language filter: expected '{asr_lang_setting}' but got '{source_lang}', "
+                f"discarding: {original_text[:60]}"
+            )
+            return
+
         self._asr_count += 1
         self._msg_id += 1
         msg_id = self._msg_id
-        source_lang = result["language"]
         timestamp = datetime.now().strftime("%H:%M:%S")
         log.info(f"ASR [{source_lang}] ({asr_ms:.0f}ms): {original_text}")
 
@@ -535,7 +632,19 @@ class LiveTransApp:
                 msg_id, timestamp, original_text, source_lang, asr_ms
             )
 
+        # Store for subtitle window (translation will be added later)
+        self._last_original = original_text
+        self._last_msg_id = msg_id
+
         target_lang = self._target_language
+
+        # Collect extra languages needed by subtitle window (beyond the primary target)
+        extra_langs = set()
+        if self._subwin and self._subwin.isVisible():
+            subwin_langs = self._subwin.get_target_languages()
+            # Remove primary target and source (no need to translate those)
+            extra_langs = subwin_langs - {target_lang, source_lang}
+
         if source_lang == target_lang:
             log.info(f"Same language ({source_lang}), no translation")
             if self._overlay:
@@ -545,14 +654,295 @@ class LiveTransApp:
                     self._translate_count,
                     self._total_prompt_tokens,
                     self._total_completion_tokens,
+                    self._compute_cost(),
                 )
+            if self._subwin and self._subwin.isVisible():
+                # Primary is same language; still need to translate extra langs
+                if extra_langs:
+                    try:
+                        self._tl_executor.submit(
+                            self._translate_subwin_only, original_text, source_lang, extra_langs
+                        )
+                    except RuntimeError:
+                        pass
+                else:
+                    self._subwin.update_text(original_text, {target_lang: original_text})
         else:
             try:
                 self._tl_executor.submit(
-                    self._translate_async, msg_id, original_text, source_lang
+                    self._translate_async, msg_id, original_text, source_lang,
+                    extra_langs or None,
                 )
             except RuntimeError:
                 log.warning("Translation executor shut down, skipping")
+
+    # ── Incremental ASR ──
+
+    _pysbd_cache = {}  # lang -> pysbd.Segmenter
+
+    @staticmethod
+    def _get_segmenter(lang: str):
+        import pysbd
+        if lang not in LiveTransApp._pysbd_cache:
+            pysbd_lang = lang if lang in pysbd.languages.LANGUAGE_CODES else "en"
+            LiveTransApp._pysbd_cache[lang] = pysbd.Segmenter(
+                language=pysbd_lang, clean=False
+            )
+        return LiveTransApp._pysbd_cache[lang]
+
+    def _split_sentences(self, text: str, lang: str = "en") -> list[str]:
+        """Split text into sentences using pysbd, with comma fallback for long text."""
+        seg = self._get_segmenter(lang)
+        parts = [p for p in seg.segment(text) if p.strip()]
+        if len(parts) > 1:
+            return parts
+
+        # Comma fallback for long unsplit text — split at last balanced comma
+        # CJK 「、」at 25 chars; all commas at 60 chars (long sentence, reduce latency)
+        min_len = 25 if any(c == '、' for c in text) else 60
+        if len(text) > min_len:
+            for i in range(len(text) - 8, 5, -1):
+                if text[i] in ',，;；、':
+                    before = text[:i + 1].strip()
+                    after = text[i + 1:].strip()
+                    if before and after and len(before) > 15 and len(after) > 3:
+                        return [before, after]
+
+        return parts
+
+    @staticmethod
+    def _is_short_utterance(text: str) -> bool:
+        """Check if text has ≤8 alphanumeric chars (likely noise/filler/fragment)."""
+        alnum = sum(1 for c in text if c.isalnum())
+        return alnum <= 8
+
+    def _strip_committed_overlap(self, text: str) -> str:
+        """Remove text that overlaps with previously committed content."""
+        if not self._interim_committed_tail:
+            return text
+        tail = self._interim_committed_tail.lower().rstrip()
+        text_lower = text.lower()
+        # Check if text starts with a suffix of the committed tail
+        max_check = min(len(tail), len(text_lower))
+        for overlap_len in range(max_check, 2, -1):
+            if text_lower[:overlap_len] == tail[-overlap_len:]:
+                stripped = text[overlap_len:].strip()
+                if stripped:
+                    log.debug(f"Stripped echo overlap ({overlap_len} chars): '{text[:overlap_len]}...'")
+                    return stripped
+                return ""
+        return text
+
+    def _do_interim_asr(self) -> bool:
+        """Run ASR on current VAD buffer, output complete sentences, trim consumed audio.
+        Returns True if any sentences were committed."""
+        peek = self._vad.peek_buffer()
+        if peek is None:
+            return False
+        audio, duration = peek
+
+        # Don't bother with very short buffers
+        if duration < 1.5:
+            return False
+
+        use_word_ts = self._asr_type == "whisper"
+
+        asr_start = time.perf_counter()
+        with self._asr_lock:
+            if not self._asr_ready or self._asr is None:
+                return False
+            try:
+                result = self._asr.transcribe(audio, word_timestamps=use_word_ts) if use_word_ts else self._asr.transcribe(audio)
+            except Exception as e:
+                log.error(f"Interim ASR error: {e}", exc_info=True)
+                return False
+        asr_ms = (time.perf_counter() - asr_start) * 1000
+
+        if result is None:
+            return False
+
+        full_text = result["text"].strip()
+        if not full_text or not any(c.isalnum() for c in full_text):
+            return False
+
+        # Strip echo from previous commit's overlap
+        full_text = self._strip_committed_overlap(full_text)
+        if not full_text:
+            return False
+
+        split_start = time.perf_counter()
+        sentences = self._split_sentences(full_text, result["language"])
+        split_ms = (time.perf_counter() - split_start) * 1000
+        if len(sentences) <= 1:
+            return False
+        log.debug(f"Interim split [{result['language']}] ({split_ms:.1f}ms): {len(sentences)} parts -> {sentences}")
+
+        # All but last are complete; last is still being spoken
+        complete = sentences[:-1]
+
+        committed_text = ""
+        for sent in complete:
+            committed_text += sent
+
+        if not committed_text.strip():
+            return False
+
+        # Determine trim point
+        total_samples = len(audio)
+        if use_word_ts and result.get("words"):
+            words = result["words"]
+            committed_lower = committed_text.lower().rstrip()
+            char_pos = 0
+            last_word_end = 0.0
+            for w in words:
+                word_text = w["word"].strip()
+                idx = committed_lower.find(word_text.lower(), char_pos)
+                if idx >= 0:
+                    char_pos = idx + len(word_text)
+                    last_word_end = w["end"]
+                if char_pos >= len(committed_lower):
+                    break
+            trim_samples = int(last_word_end * 16000)
+        else:
+            # Proportional trim with safety margin to reduce echo
+            ratio = len(committed_text) / max(len(full_text), 1)
+            margin = int(0.3 * 16000)  # 0.3s extra trim to avoid re-recognition
+            trim_samples = int(ratio * total_samples) + margin
+            # Don't over-trim: keep at least 0.5s for the remaining sentence
+            max_trim = total_samples - int(0.5 * 16000)
+            trim_samples = min(trim_samples, max(max_trim, 0))
+            # Minimum trim to prevent re-recognition loops
+            min_trim = int(0.3 * 16000)
+            if trim_samples < min_trim and trim_samples > 0:
+                trim_samples = min(min_trim, total_samples // 2)
+
+        # Output committed sentences
+        actually_committed = False
+        for sent in complete:
+            text = sent.strip()
+            if not text:
+                continue
+            if self._is_short_utterance(text):
+                self._interim_pending += text
+                log.debug(f"Interim short utterance buffered: '{text}', pending='{self._interim_pending}'")
+                continue
+
+            if self._interim_pending:
+                text = self._interim_pending + text
+                self._interim_pending = ""
+
+            self._process_segment_text(text, result["language"], asr_ms)
+            actually_committed = True
+
+        if not actually_committed:
+            return False
+
+        # Trim consumed audio from VAD buffer
+        if trim_samples > 0:
+            self._vad.trim_front(trim_samples)
+
+        # Track committed text tail for echo dedup
+        self._interim_committed_tail = committed_text[-50:] if len(committed_text) > 50 else committed_text
+
+        self._interim_active = True
+        log.info(f"Interim ASR: committed {len(complete)} sentence(s), trimmed {trim_samples / 16000:.2f}s")
+        return True
+
+    def _process_segment_text(self, text: str, source_lang: str, asr_ms: float = 0):
+        """Output a text result (from interim or final) — similar to _process_segment but skips ASR."""
+        original_text = text.strip()
+        if not original_text or not any(c.isalnum() for c in original_text):
+            return
+
+        asr_lang_setting = self._panel.get_settings().get("asr_language", "auto") if self._panel else "auto"
+        if asr_lang_setting != "auto" and source_lang != asr_lang_setting:
+            log.info(f"Language filter: expected '{asr_lang_setting}' but got '{source_lang}', discarding: {original_text[:60]}")
+            return
+
+        self._asr_count += 1
+        self._msg_id += 1
+        msg_id = self._msg_id
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        log.info(f"ASR [{source_lang}] ({asr_ms:.0f}ms, interim): {original_text}")
+
+        if self._overlay:
+            self._overlay.add_message(msg_id, timestamp, original_text, source_lang, asr_ms)
+
+        self._last_original = original_text
+        self._last_msg_id = msg_id
+
+        target_lang = self._target_language
+        extra_langs = set()
+        if self._subwin and self._subwin.isVisible():
+            subwin_langs = self._subwin.get_target_languages()
+            extra_langs = subwin_langs - {target_lang, source_lang}
+
+        if source_lang == target_lang:
+            log.info(f"Same language ({source_lang}), no translation")
+            if self._overlay:
+                self._overlay.update_translation(msg_id, "", 0)
+                self._overlay.update_stats(self._asr_count, self._translate_count, self._total_prompt_tokens, self._total_completion_tokens, self._compute_cost())
+            if self._subwin and self._subwin.isVisible():
+                if extra_langs:
+                    try:
+                        self._tl_executor.submit(self._translate_subwin_only, original_text, source_lang, extra_langs)
+                    except RuntimeError:
+                        pass
+                else:
+                    self._subwin.update_text(original_text, {target_lang: original_text})
+        else:
+            try:
+                self._tl_executor.submit(self._translate_async, msg_id, original_text, source_lang, extra_langs or None)
+            except RuntimeError:
+                log.warning("Translation executor shut down, skipping")
+
+    def _process_interim_final(self, speech_segment):
+        """Handle VAD flush after interim outputs were already made."""
+        seg_len = len(speech_segment) / 16000
+        log.info(f"Interim final segment: {seg_len:.1f}s")
+
+        asr_start = time.perf_counter()
+        with self._asr_lock:
+            if not self._asr_ready or self._asr is None:
+                return
+            try:
+                result = self._asr.transcribe(speech_segment)
+            except Exception as e:
+                log.error(f"Interim final ASR error: {e}", exc_info=True)
+                return
+        asr_ms = (time.perf_counter() - asr_start) * 1000
+
+        if result is None:
+            # Flush any remaining pending
+            if self._interim_pending:
+                text = self._interim_pending
+                self._interim_pending = ""
+                lang = self._panel.get_settings().get("asr_language", "auto") if self._panel else "auto"
+                if lang == "auto":
+                    lang = "unknown"
+                self._process_segment_text(text, lang)
+            return
+
+        original_text = result["text"].strip()
+
+        # Strip echo from previous commit's overlap
+        original_text = self._strip_committed_overlap(original_text)
+
+        # Prepend any remaining pending short utterances
+        if self._interim_pending:
+            original_text = self._interim_pending + original_text
+            self._interim_pending = ""
+
+        if not original_text or not any(c.isalnum() for c in original_text):
+            return
+
+        # Apply noise filter like _process_segment
+        alnum_chars = sum(1 for c in original_text if c.isalnum())
+        if seg_len >= 2.0 and alnum_chars <= 3:
+            log.debug(f"Noise filter: {seg_len:.1f}s segment produced only '{original_text}', skipping")
+            return
+
+        self._process_segment_text(original_text, result["language"], asr_ms)
 
     def _pipeline_loop(self):
         silence_chunk = np.zeros(
@@ -585,14 +975,38 @@ class LiveTransApp:
                 self._overlay.update_monitor(rms, self._vad.last_confidence, mic_rms)
 
             speech_segment = self._vad.process_chunk(chunk)
+
             if speech_segment is None:
+                # Still accumulating — check for interim ASR
+                if (self._incremental_enabled and self._asr_ready
+                        and self._vad._is_speaking):
+                    buf_samples = self._vad._speech_samples
+                    total_dur = buf_samples / 16000
+                    elapsed = (buf_samples - self._last_interim_samples) / 16000
+                    now = time.perf_counter()
+                    cooldown = now - self._last_interim_check_time
+                    if total_dur >= self._interim_interval and elapsed >= self._interim_interval and cooldown >= 1.0:
+                        self._last_interim_check_time = now
+                        committed = self._do_interim_asr()
+                        if committed:
+                            self._last_interim_samples = self._vad._speech_samples
                 continue
 
             if not self._asr_ready:
                 log.debug("ASR not ready, dropping segment")
                 continue
 
-            self._process_segment(speech_segment)
+            # VAD flushed — handle final segment
+            if self._interim_active:
+                self._process_interim_final(speech_segment)
+            else:
+                self._process_segment(speech_segment)
+            # Reset interim state
+            self._interim_active = False
+            self._interim_pending = ""
+            self._last_interim_samples = 0
+            self._last_interim_check_time = 0.0
+            self._interim_committed_tail = ""
 
 
 def main():
@@ -652,8 +1066,14 @@ def main():
     overlay = SubtitleOverlay(config["subtitle"])
     overlay.show()
 
+    # Subtitle window
+    subwin_cfg = (saved or {}).get("subtitle_mode")
+    subwin = SubtitleWindow(subwin_cfg)
+    subwin_was_enabled = (subwin_cfg or {}).get("enabled", False)
+
     live_trans = LiveTransApp(config)
     live_trans.set_overlay(overlay)
+    live_trans.set_subtitle_window(subwin)
     live_trans.set_panel(panel)
 
     def _deferred_init():
@@ -714,10 +1134,20 @@ def main():
     # --- Show/hide overlay ---
     overlay_toggle_action = QAction(t("tray_hide_overlay"))
 
+    _hide_notified = [False]
+
     def on_toggle_overlay():
         if overlay.isVisible():
             overlay.hide()
             overlay_toggle_action.setText(t("tray_show_overlay"))
+            if not _hide_notified[0]:
+                _hide_notified[0] = True
+                tray.showMessage(
+                    "LiveTrans",
+                    t("hide_tray_hint"),
+                    QSystemTrayIcon.MessageIcon.Information,
+                    3000,
+                )
         else:
             overlay.show()
             overlay.raise_()
@@ -725,6 +1155,72 @@ def main():
 
     overlay_toggle_action.triggered.connect(on_toggle_overlay)
     menu.addAction(overlay_toggle_action)
+
+    # --- Subtitle window toggle ---
+    subwin_toggle_action = QAction(t("subwin_show"), checkable=True)
+
+    def _save_subwin_state():
+        settings = panel.get_settings()
+        sm = settings.get("subtitle_mode") or {}
+        sm["enabled"] = subwin.isVisible()
+        pos = subwin.pos()
+        sm["window_x"] = pos.x()
+        sm["window_y"] = pos.y()
+        settings["subtitle_mode"] = sm
+        panel._current_settings["subtitle_mode"] = sm
+        _save_settings(settings)
+
+    _subwin_notified = [False]
+
+    def on_toggle_subwin(checked):
+        if checked:
+            subwin.show()
+            subwin.raise_()
+            if not _subwin_notified[0]:
+                _subwin_notified[0] = True
+                tray.showMessage(
+                    "LiveTrans",
+                    t("subwin_drag_hint"),
+                    QSystemTrayIcon.MessageIcon.Information,
+                    3000,
+                )
+        else:
+            subwin.hide()
+        overlay.set_subtitle_checked(checked)
+        _save_subwin_state()
+
+    subwin_toggle_action.toggled.connect(on_toggle_subwin)
+    subwin.position_changed.connect(_save_subwin_state)
+
+    # Sync when subtitle window is manually closed (e.g. Alt+F4)
+    def _on_subwin_closed():
+        subwin_toggle_action.blockSignals(True)
+        subwin_toggle_action.setChecked(False)
+        subwin_toggle_action.blockSignals(False)
+        overlay.set_subtitle_checked(False)
+        _save_subwin_state()
+
+    subwin.window_closed.connect(_on_subwin_closed)
+
+    # Restore subtitle window visibility from saved state
+    if subwin_was_enabled:
+        subwin_toggle_action.setChecked(True)
+
+    menu.addAction(subwin_toggle_action)
+
+    # Connect overlay subtitle button
+    def _on_overlay_subtitle_toggle():
+        subwin_toggle_action.setChecked(not subwin_toggle_action.isChecked())
+
+    overlay.subtitle_toggled.connect(_on_overlay_subtitle_toggle)
+
+    # Connect panel subtitle settings changes
+    def _on_panel_subtitle_changed(s):
+        subwin.apply_settings(s)
+
+    panel.subtitle_settings_changed.connect(_on_panel_subtitle_changed)
+
+    menu.addSeparator()
 
     # --- Show log / panel ---
     log_action = QAction(t("tray_show_log"))
@@ -746,8 +1242,8 @@ def main():
 
     log_action.triggered.connect(on_toggle_log)
     panel_action.triggered.connect(on_toggle_panel)
-    menu.addAction(log_action)
     menu.addAction(panel_action)
+    menu.addAction(log_action)
     menu.addSeparator()
 
     # --- Overlay submenu (click-through, topmost, auto-scroll, taskbar) ---
@@ -939,6 +1435,7 @@ def main():
     overlay.model_switch_requested.connect(on_overlay_model_switch)
     overlay.start_requested.connect(on_resume)
     overlay.stop_requested.connect(on_pause)
+    overlay.hide_requested.connect(on_toggle_overlay)
     overlay.quit_requested.connect(on_quit)
 
     tray.setContextMenu(menu)

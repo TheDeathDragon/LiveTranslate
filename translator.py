@@ -41,8 +41,33 @@ LANGUAGE_DISPLAY = {
 DEFAULT_PROMPT = (
     "You are a subtitle translator. Translate {source_lang} into {target_lang}.\n"
     "Output ONLY the translated text, nothing else.\n"
+    "Keep proper nouns, names, and brand names untranslated.\n"
     "Keep the translation natural, colloquial, and concise."
 )
+
+PROMPT_PRESETS = {
+    "daily": (
+        "You are a subtitle translator for casual conversation. "
+        "Translate {source_lang} into {target_lang}.\n"
+        "Output ONLY the translated text, nothing else.\n"
+        "Keep proper nouns, names, and brand names untranslated.\n"
+        "Use natural, casual, everyday language. Keep it conversational and concise."
+    ),
+    "esports": (
+        "You are a subtitle translator for esports/gaming live streams. "
+        "Translate {source_lang} into {target_lang}.\n"
+        "Output ONLY the translated text, nothing else.\n"
+        "Keep player names (IGN), team names, game terms, and brand names untranslated.\n"
+        "Use energetic, concise language appropriate for competitive gaming commentary."
+    ),
+    "anime": (
+        "You are a subtitle translator for anime, movies, and TV shows. "
+        "Translate {source_lang} into {target_lang}.\n"
+        "Output ONLY the translated text, nothing else.\n"
+        "Keep character names, place names, and cultural terms untranslated.\n"
+        "Use natural, expressive language that matches the tone and emotion of the dialogue."
+    ),
+}
 
 
 def make_openai_client(
@@ -75,10 +100,14 @@ class Translator:
         system_prompt=None,
         proxy="none",
         no_system_role=False,
+        no_think=False,
         timeout=10,
     ):
         self._client = make_openai_client(api_base, api_key, proxy, timeout=timeout)
         self._no_system_role = no_system_role
+        self._no_think = no_think
+        if no_think:
+            log.info(f"Translator: no_think enabled for {model}")
         self._model = model
         self._target_language = target_language
         self._max_tokens = max_tokens
@@ -93,6 +122,23 @@ class Translator:
     def last_usage(self):
         """(prompt_tokens, completion_tokens) from last translate call."""
         return self._last_prompt_tokens, self._last_completion_tokens
+
+    def with_target_language(self, target_language: str) -> "Translator":
+        """Create a new Translator with a different target language, sharing the same client."""
+        t = Translator.__new__(Translator)
+        t._client = self._client
+        t._no_system_role = self._no_system_role
+        t._no_think = self._no_think
+        t._model = self._model
+        t._target_language = target_language
+        t._max_tokens = self._max_tokens
+        t._temperature = self._temperature
+        t._streaming = self._streaming
+        t._timeout = self._timeout
+        t._system_prompt_template = self._system_prompt_template
+        t._last_prompt_tokens = 0
+        t._last_completion_tokens = 0
+        return t
 
     def _build_system_prompt(self, source_lang):
         src = LANGUAGE_DISPLAY.get(source_lang, source_lang)
@@ -122,12 +168,15 @@ class Translator:
             return self._translate_sync(system_prompt, text)
 
     def _translate_sync(self, system_prompt, text):
-        resp = self._client.chat.completions.create(
+        kwargs = dict(
             model=self._model,
             messages=self._build_messages(system_prompt, text),
             max_tokens=self._max_tokens,
             temperature=self._temperature,
         )
+        if self._no_think:
+            kwargs["extra_body"] = {"enable_thinking": False}
+        resp = self._client.chat.completions.create(**kwargs)
         self._last_prompt_tokens = 0
         self._last_completion_tokens = 0
         if resp.usage:
@@ -145,6 +194,8 @@ class Translator:
             temperature=self._temperature,
             stream=True,
         )
+        if self._no_think:
+            base_kwargs["extra_body"] = {"enable_thinking": False}
         try:
             stream = self._client.chat.completions.create(
                 **base_kwargs,

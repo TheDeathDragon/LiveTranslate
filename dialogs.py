@@ -10,8 +10,10 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
     QPushButton,
@@ -364,6 +366,27 @@ class ModelEditDialog(QDialog):
         self._proxy_url.setEnabled(False)
 
         self._no_system_role = QCheckBox(t("no_system_role"))
+        self._no_think = QCheckBox(t("no_think"))
+        self._no_think.setToolTip(t("no_think_hint"))
+
+        # Pricing
+        price_suffix = t("price_suffix")
+        self._input_price = QDoubleSpinBox()
+        self._input_price.setRange(0, 999)
+        self._input_price.setDecimals(2)
+        self._input_price.setSuffix(price_suffix)
+        self._input_price.setSpecialValueText("—")
+        self._output_price = QDoubleSpinBox()
+        self._output_price.setRange(0, 999)
+        self._output_price.setDecimals(2)
+        self._output_price.setSuffix(price_suffix)
+        self._output_price.setSpecialValueText("—")
+
+        price_row = QHBoxLayout()
+        price_row.addWidget(QLabel(t("label_input_price")))
+        price_row.addWidget(self._input_price)
+        price_row.addWidget(QLabel(t("label_output_price")))
+        price_row.addWidget(self._output_price)
 
         layout.addRow(t("label_display_name"), self._name)
         layout.addRow(t("label_api_base"), self._api_base)
@@ -371,7 +394,9 @@ class ModelEditDialog(QDialog):
         layout.addRow(t("label_model"), self._model)
         layout.addRow(t("label_proxy"), self._proxy_mode)
         layout.addRow(t("label_proxy_url"), self._proxy_url)
+        layout.addRow(t("label_pricing"), price_row)
         layout.addRow("", self._no_system_role)
+        layout.addRow("", self._no_think)
         hint = QLabel(t("no_system_role_hint"))
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #888; font-size: 11px;")
@@ -391,6 +416,9 @@ class ModelEditDialog(QDialog):
             else:
                 self._proxy_mode.setCurrentIndex(0)
             self._no_system_role.setChecked(model_data.get("no_system_role", False))
+            self._no_think.setChecked(model_data.get("no_think", False))
+            self._input_price.setValue(model_data.get("input_price", 0))
+            self._output_price.setValue(model_data.get("output_price", 0))
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -419,4 +447,10 @@ class ModelEditDialog(QDialog):
         }
         if self._no_system_role.isChecked():
             result["no_system_role"] = True
+        if self._no_think.isChecked():
+            result["no_think"] = True
+        if self._input_price.value() > 0:
+            result["input_price"] = self._input_price.value()
+        if self._output_price.value() > 0:
+            result["output_price"] = self._output_price.value()
         return result

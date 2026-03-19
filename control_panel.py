@@ -39,6 +39,7 @@ from model_manager import (
     get_cache_entries,
 )
 from i18n import t, LANGUAGES
+from subtitle_settings import SubtitleSettingsWidget
 
 log = logging.getLogger("LiveTrans.Panel")
 
@@ -67,6 +68,9 @@ _VALID_KEYS = {
     "target_language",
     "ui_lang",
     "style",
+    "subtitle_mode",
+    "incremental_asr",
+    "interim_interval",
 }
 
 
@@ -105,6 +109,7 @@ class ControlPanel(QWidget):
     settings_changed = pyqtSignal(dict)
     model_changed = pyqtSignal(dict)
     models_list_changed = pyqtSignal(list, int)
+    subtitle_settings_changed = pyqtSignal(dict)
     _bench_result = pyqtSignal(str)
     _cache_result = pyqtSignal(list)
 
@@ -161,6 +166,7 @@ class ControlPanel(QWidget):
         tabs.addTab(self._create_vad_tab(), t("tab_vad_asr"))
         tabs.addTab(self._create_translation_tab(), t("tab_translation"))
         tabs.addTab(self._create_style_tab(), t("tab_style"))
+        tabs.addTab(self._create_subtitle_tab(), t("tab_subtitle"))
         tabs.addTab(self._create_benchmark_tab(), t("tab_benchmark"))
         self._cache_tab_index = tabs.addTab(self._create_cache_tab(), t("tab_cache"))
         tabs.currentChanged.connect(self._on_tab_changed)
@@ -184,8 +190,11 @@ class ControlPanel(QWidget):
 
         asr_group = QGroupBox(t("group_asr_engine"))
         asr_layout = QGridLayout(asr_group)
+        asr_layout.setColumnStretch(0, 1)
+        asr_layout.setColumnMinimumWidth(1, 180)
 
         self._asr_engine = QComboBox()
+        self._asr_engine.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self._asr_engine.addItems(
             [
                 "Whisper (faster-whisper)",
@@ -380,17 +389,19 @@ class ControlPanel(QWidget):
 
         timing_group = QGroupBox(t("group_timing"))
         timing_layout = QGridLayout(timing_group)
+        timing_layout.setColumnStretch(0, 1)
+        timing_layout.setColumnMinimumWidth(1, 180)
         self._min_speech = QDoubleSpinBox()
         self._min_speech.setRange(0.1, 5.0)
         self._min_speech.setSingleStep(0.1)
-        self._min_speech.setValue(s.get("min_speech_duration", 1.0))
+        self._min_speech.setValue(s.get("min_speech_duration", 2.0))
         self._min_speech.setSuffix(" s")
         self._min_speech.valueChanged.connect(self._on_timing_changed)
         self._min_speech.valueChanged.connect(self._auto_save)
         self._max_speech = QDoubleSpinBox()
-        self._max_speech.setRange(3.0, 30.0)
+        self._max_speech.setRange(2.0, 30.0)
         self._max_speech.setSingleStep(1.0)
-        self._max_speech.setValue(s.get("max_speech_duration", 8.0))
+        self._max_speech.setValue(s.get("max_speech_duration", 6.0))
         self._max_speech.setSuffix(" s")
         self._max_speech.valueChanged.connect(self._on_timing_changed)
         self._max_speech.valueChanged.connect(self._auto_save)
@@ -419,6 +430,28 @@ class ControlPanel(QWidget):
         timing_layout.addWidget(self._silence_mode, 2, 1)
         timing_layout.addWidget(QLabel(t("label_silence_dur")), 3, 0)
         timing_layout.addWidget(self._silence_duration, 3, 1)
+
+        from PyQt6.QtWidgets import QCheckBox
+
+        self._incremental_asr_cb = QCheckBox(t("label_incremental_asr"))
+        self._incremental_asr_cb.setToolTip(t("incremental_asr_tooltip"))
+        self._incremental_asr_cb.setChecked(s.get("incremental_asr", True))
+        self._incremental_asr_cb.toggled.connect(self._on_timing_changed)
+        self._incremental_asr_cb.toggled.connect(self._auto_save)
+        timing_layout.addWidget(self._incremental_asr_cb, 4, 0)
+
+        self._interim_interval_spin = QDoubleSpinBox()
+        self._interim_interval_spin.setRange(1.0, 10.0)
+        self._interim_interval_spin.setSingleStep(0.5)
+        self._interim_interval_spin.setValue(s.get("interim_interval", 2.0))
+        self._interim_interval_spin.setSuffix(" s")
+        self._interim_interval_spin.setEnabled(s.get("incremental_asr", True))
+        self._interim_interval_spin.valueChanged.connect(self._on_timing_changed)
+        self._interim_interval_spin.valueChanged.connect(self._auto_save)
+        self._incremental_asr_cb.toggled.connect(self._interim_interval_spin.setEnabled)
+        timing_layout.addWidget(QLabel(t("label_interim_interval")), 5, 0)
+        timing_layout.addWidget(self._interim_interval_spin, 5, 1)
+
         layout.addWidget(timing_group)
 
         layout.addStretch()
@@ -459,29 +492,50 @@ class ControlPanel(QWidget):
         prompt_group = QGroupBox(t("group_system_prompt"))
         prompt_layout = QVBoxLayout(prompt_group)
 
-        from translator import DEFAULT_PROMPT
+        from translator import DEFAULT_PROMPT, PROMPT_PRESETS
 
+        # Preset selector
+        preset_row = QHBoxLayout()
+        preset_row.addWidget(QLabel(t("label_prompt_preset")))
+        self._prompt_preset = QComboBox()
+        self._prompt_preset.addItem(t("prompt_daily"), "daily")
+        self._prompt_preset.addItem(t("prompt_esports"), "esports")
+        self._prompt_preset.addItem(t("prompt_anime"), "anime")
+        self._prompt_preset.addItem(t("prompt_custom"), "custom")
+
+        current_prompt = s.get("system_prompt", DEFAULT_PROMPT)
+        preset_idx = 3  # default to custom
+        for i, key in enumerate(["daily", "esports", "anime"]):
+            if current_prompt.strip() == PROMPT_PRESETS[key].strip():
+                preset_idx = i
+                break
+        if current_prompt.strip() == DEFAULT_PROMPT.strip():
+            preset_idx = 0
+        self._prompt_preset.setCurrentIndex(preset_idx)
+        self._prompt_preset.currentIndexChanged.connect(self._on_prompt_preset_changed)
+        preset_row.addWidget(self._prompt_preset, 1)
+        prompt_layout.addLayout(preset_row)
+
+        # Prompt text editor
         self._prompt_edit = QTextEdit()
         self._prompt_edit.setFont(QFont("Consolas", 9))
         self._prompt_edit.setMaximumHeight(100)
-        self._prompt_edit.setPlainText(s.get("system_prompt", DEFAULT_PROMPT))
+        self._prompt_edit.setPlainText(current_prompt)
         prompt_layout.addWidget(self._prompt_edit)
 
         prompt_btn_row = QHBoxLayout()
-        reset_prompt_btn = QPushButton(t("btn_restore_default"))
-        reset_prompt_btn.clicked.connect(
-            lambda: self._prompt_edit.setPlainText(DEFAULT_PROMPT)
-        )
-        prompt_btn_row.addWidget(reset_prompt_btn)
+        prompt_btn_row.addStretch()
         apply_prompt_btn = QPushButton(t("btn_apply_prompt"))
         apply_prompt_btn.clicked.connect(self._apply_prompt)
         prompt_btn_row.addWidget(apply_prompt_btn)
-        prompt_btn_row.addStretch()
         prompt_layout.addLayout(prompt_btn_row)
         layout.addWidget(prompt_group)
 
-        timeout_group = QGroupBox(t("group_timeout"))
-        timeout_layout = QHBoxLayout(timeout_group)
+        net_group = QGroupBox(t("group_network"))
+        net_layout = QGridLayout(net_group)
+        net_layout.setColumnStretch(0, 1)
+        net_layout.setColumnMinimumWidth(1, 180)
+        net_layout.addWidget(QLabel(t("label_timeout")), 0, 0)
         self._timeout_spin = QSpinBox()
         self._timeout_spin.setRange(1, 60)
         self._timeout_spin.setValue(s.get("timeout", 5))
@@ -490,9 +544,8 @@ class ControlPanel(QWidget):
             lambda v: self._current_settings.update({"timeout": v})
         )
         self._timeout_spin.valueChanged.connect(self._auto_save)
-        timeout_layout.addWidget(self._timeout_spin)
-        timeout_layout.addStretch()
-        layout.addWidget(timeout_group)
+        net_layout.addWidget(self._timeout_spin, 0, 1)
+        layout.addWidget(net_group)
 
         layout.addStretch()
         return widget
@@ -545,6 +598,8 @@ class ControlPanel(QWidget):
         # Background group
         bg_group = QGroupBox(t("group_background"))
         bg_layout = QGridLayout(bg_group)
+        bg_layout.setColumnStretch(0, 1)
+        bg_layout.setColumnMinimumWidth(1, 180)
 
         bg_layout.addWidget(QLabel(t("label_bg_color")), 0, 0)
         self._bg_color_btn = self._make_color_btn(
@@ -554,17 +609,13 @@ class ControlPanel(QWidget):
         bg_layout.addWidget(self._bg_color_btn, 0, 1)
 
         bg_layout.addWidget(QLabel(t("label_bg_opacity")), 1, 0)
-        self._bg_opacity = QSlider(Qt.Orientation.Horizontal)
-        self._bg_opacity.setRange(0, 255)
-        self._bg_opacity.setValue(s.get("bg_opacity", DEFAULT_STYLE["bg_opacity"]))
-        self._bg_opacity_label = QLabel(str(self._bg_opacity.value()))
-        self._bg_opacity.valueChanged.connect(
-            lambda v: self._bg_opacity_label.setText(str(v))
-        )
+        self._bg_opacity = QSpinBox()
+        self._bg_opacity.setRange(0, 100)
+        self._bg_opacity.setSuffix("%")
+        self._bg_opacity.setValue(round(s.get("bg_opacity", DEFAULT_STYLE["bg_opacity"]) / 255 * 100))
         self._bg_opacity.valueChanged.connect(self._on_style_value_changed)
-        self._bg_opacity.sliderReleased.connect(self._auto_save)
+        self._bg_opacity.valueChanged.connect(self._auto_save)
         bg_layout.addWidget(self._bg_opacity, 1, 1)
-        bg_layout.addWidget(self._bg_opacity_label, 1, 2)
 
         bg_layout.addWidget(QLabel(t("label_header_color")), 2, 0)
         self._header_color_btn = self._make_color_btn(
@@ -576,19 +627,13 @@ class ControlPanel(QWidget):
         bg_layout.addWidget(self._header_color_btn, 2, 1)
 
         bg_layout.addWidget(QLabel(t("label_header_opacity")), 3, 0)
-        self._header_opacity = QSlider(Qt.Orientation.Horizontal)
-        self._header_opacity.setRange(0, 255)
-        self._header_opacity.setValue(
-            s.get("header_opacity", DEFAULT_STYLE["header_opacity"])
-        )
-        self._header_opacity_label = QLabel(str(self._header_opacity.value()))
-        self._header_opacity.valueChanged.connect(
-            lambda v: self._header_opacity_label.setText(str(v))
-        )
+        self._header_opacity = QSpinBox()
+        self._header_opacity.setRange(0, 100)
+        self._header_opacity.setSuffix("%")
+        self._header_opacity.setValue(round(s.get("header_opacity", DEFAULT_STYLE["header_opacity"]) / 255 * 100))
         self._header_opacity.valueChanged.connect(self._on_style_value_changed)
-        self._header_opacity.sliderReleased.connect(self._auto_save)
+        self._header_opacity.valueChanged.connect(self._auto_save)
         bg_layout.addWidget(self._header_opacity, 3, 1)
-        bg_layout.addWidget(self._header_opacity_label, 3, 2)
 
         bg_layout.addWidget(QLabel(t("label_border_radius")), 4, 0)
         self._border_radius = QSpinBox()
@@ -606,6 +651,8 @@ class ControlPanel(QWidget):
         # Text group
         text_group = QGroupBox(t("group_text"))
         text_layout = QGridLayout(text_group)
+        text_layout.setColumnStretch(0, 1)
+        text_layout.setColumnMinimumWidth(1, 180)
 
         text_layout.addWidget(QLabel(t("label_original_font")), 0, 0)
         self._orig_font_combo = QFontComboBox()
@@ -681,20 +728,16 @@ class ControlPanel(QWidget):
         # Window group
         win_group = QGroupBox(t("group_window"))
         win_layout = QGridLayout(win_group)
+        win_layout.setColumnStretch(0, 1)
+        win_layout.setColumnMinimumWidth(1, 180)
         win_layout.addWidget(QLabel(t("label_window_opacity")), 0, 0)
-        self._window_opacity = QSlider(Qt.Orientation.Horizontal)
+        self._window_opacity = QSpinBox()
         self._window_opacity.setRange(30, 100)
-        self._window_opacity.setValue(
-            s.get("window_opacity", DEFAULT_STYLE["window_opacity"])
-        )
-        self._window_opacity_label = QLabel(f"{self._window_opacity.value()}%")
-        self._window_opacity.valueChanged.connect(
-            lambda v: self._window_opacity_label.setText(f"{v}%")
-        )
+        self._window_opacity.setSuffix("%")
+        self._window_opacity.setValue(s.get("window_opacity", DEFAULT_STYLE["window_opacity"]))
         self._window_opacity.valueChanged.connect(self._on_style_value_changed)
-        self._window_opacity.sliderReleased.connect(self._auto_save)
+        self._window_opacity.valueChanged.connect(self._auto_save)
         win_layout.addWidget(self._window_opacity, 0, 1)
-        win_layout.addWidget(self._window_opacity_label, 0, 2)
         layout.addWidget(win_group)
 
         layout.addStretch()
@@ -727,9 +770,9 @@ class ControlPanel(QWidget):
         return {
             "preset": self._preset_keys[self._style_preset.currentIndex()],
             "bg_color": self._bg_color_btn.property("hex_color"),
-            "bg_opacity": self._bg_opacity.value(),
+            "bg_opacity": round(self._bg_opacity.value() / 100 * 255),
             "header_color": self._header_color_btn.property("hex_color"),
-            "header_opacity": self._header_opacity.value(),
+            "header_opacity": round(self._header_opacity.value() / 100 * 255),
             "border_radius": self._border_radius.value(),
             "original_font_family": self._orig_font_combo.currentFont().family(),
             "translation_font_family": self._trans_font_combo.currentFont().family(),
@@ -747,12 +790,12 @@ class ControlPanel(QWidget):
         self._bg_color_btn.setStyleSheet(
             f"background-color: {s['bg_color']}; border: 1px solid #888; border-radius: 3px;"
         )
-        self._bg_opacity.setValue(s["bg_opacity"])
+        self._bg_opacity.setValue(round(s["bg_opacity"] / 255 * 100))
         self._header_color_btn.setProperty("hex_color", s["header_color"])
         self._header_color_btn.setStyleSheet(
             f"background-color: {s['header_color']}; border: 1px solid #888; border-radius: 3px;"
         )
-        self._header_opacity.setValue(s["header_opacity"])
+        self._header_opacity.setValue(round(s["header_opacity"] / 255 * 100))
         self._border_radius.setValue(s["border_radius"])
         self._orig_font_combo.setCurrentFont(QFont(s["original_font_family"]))
         self._trans_font_combo.setCurrentFont(QFont(s["translation_font_family"]))
@@ -793,12 +836,7 @@ class ControlPanel(QWidget):
             self._style_preset.blockSignals(True)
             self._style_preset.setCurrentIndex(custom_idx)
             self._style_preset.blockSignals(False)
-        if (
-            not self._bg_opacity.isSliderDown()
-            and not self._header_opacity.isSliderDown()
-            and not self._window_opacity.isSliderDown()
-        ):
-            self._auto_save()
+        self._auto_save()
 
     def _reset_style(self):
         from subtitle_overlay import DEFAULT_STYLE
@@ -823,6 +861,23 @@ class ControlPanel(QWidget):
             self._window_opacity,
         ):
             w.blockSignals(block)
+
+    # ── Subtitle Tab ──
+
+    def _create_subtitle_tab(self):
+        subtitle_settings = self._current_settings.get("subtitle_mode") or {}
+        self._subtitle_widget = SubtitleSettingsWidget(subtitle_settings)
+        self._subtitle_widget.settings_changed.connect(self._on_subtitle_settings_changed)
+        return self._subtitle_widget
+
+    def _on_subtitle_settings_changed(self, s):
+        self._current_settings["subtitle_mode"] = s
+        self._auto_save()
+        self.subtitle_settings_changed.emit(s)
+
+    def update_subtitle_settings(self, s):
+        self._current_settings["subtitle_mode"] = s
+        self._subtitle_widget.update_settings(s)
 
     # ── Benchmark Tab ──
 
@@ -951,6 +1006,8 @@ class ControlPanel(QWidget):
 
     def _on_engine_changed_whisper_vis(self, index):
         self._whisper_group.setVisible(index == 0)
+        # Resize window to fit content after whisper group visibility change
+        QTimer.singleShot(0, lambda: self.resize(self.width(), self.sizeHint().height()))
 
     def _update_whisper_size_label(self):
         from model_manager import is_asr_cached, _MODEL_SIZE_BYTES
@@ -1045,6 +1102,10 @@ class ControlPanel(QWidget):
                 self._refresh_model_list()
                 _save_settings(self._current_settings)
                 self._emit_models_list_changed()
+                # Re-apply if editing the active model
+                active = self._current_settings.get("active_model", 0)
+                if row == active:
+                    self.model_changed.emit(data)
 
     def _dup_model(self):
         row = self._model_list.currentRow()
@@ -1137,12 +1198,14 @@ class ControlPanel(QWidget):
             self._auto_save()
 
     def _on_timing_changed(self):
-        self._current_settings["min_speech_duration"] = self._min_speech.value()
-        self._current_settings["max_speech_duration"] = self._max_speech.value()
+        self._current_settings["min_speech_duration"] = round(self._min_speech.value(), 2)
+        self._current_settings["max_speech_duration"] = round(self._max_speech.value(), 2)
         self._current_settings["silence_mode"] = (
             "auto" if self._silence_mode.currentIndex() == 0 else "fixed"
         )
-        self._current_settings["silence_duration"] = self._silence_duration.value()
+        self._current_settings["silence_duration"] = round(self._silence_duration.value(), 2)
+        self._current_settings["incremental_asr"] = self._incremental_asr_cb.isChecked()
+        self._current_settings["interim_interval"] = round(self._interim_interval_spin.value(), 2)
 
     def _on_ui_lang_changed(self, index):
         lang = "en" if index == 0 else "zh"
@@ -1167,6 +1230,15 @@ class ControlPanel(QWidget):
         self._apply_settings()
         _save_settings(self._current_settings)
 
+    def _on_prompt_preset_changed(self, index):
+        from translator import DEFAULT_PROMPT, PROMPT_PRESETS
+        key = self._prompt_preset.itemData(index)
+        if key == "custom":
+            return
+        prompt = PROMPT_PRESETS.get(key, DEFAULT_PROMPT)
+        self._prompt_edit.setPlainText(prompt)
+        self._apply_prompt()
+
     def _apply_prompt(self):
         text = self._prompt_edit.toPlainText().strip()
         if text:
@@ -1176,6 +1248,16 @@ class ControlPanel(QWidget):
                 self.model_changed.emit(active)
             _save_settings(self._current_settings)
             log.info("System prompt updated")
+            # Update preset combo to reflect current state
+            from translator import PROMPT_PRESETS
+            self._prompt_preset.blockSignals(True)
+            matched = 3  # custom
+            for i, key in enumerate(["daily", "esports", "anime"]):
+                if text.strip() == PROMPT_PRESETS[key].strip():
+                    matched = i
+                    break
+            self._prompt_preset.setCurrentIndex(matched)
+            self._prompt_preset.blockSignals(False)
 
     def _apply_settings(self):
         self._current_settings["asr_language"] = self._get_asr_lang_code()

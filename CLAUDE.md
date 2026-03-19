@@ -31,9 +31,11 @@ main.py (LiveTransApp)
   |-- asr_funasr_nano.py   FunASR Nano backend
   |-- asr_qwen3.py         Qwen3-ASR backend (ONNX Encoder + GGUF Decoder)
   |-- qwen_asr_gguf/       Qwen3-ASR inference engine (from Qwen3-ASR-GGUF project)
-  |-- translator.py        OpenAI-compatible API client, streaming, make_openai_client()
+  |-- translator.py        OpenAI-compatible API client, streaming, no_think support
   |-- subtitle_overlay.py  PyQt6 transparent overlay (2-row header: controls + model/lang combos)
-  |-- control_panel.py     Settings UI (5 tabs: VAD/ASR, Translation, Style, Benchmark, Cache)
+  |-- subtitle_window.py   Standalone subtitle window for OBS capture (outlined text, animations)
+  |-- subtitle_settings.py Subtitle window settings UI (grid layout, text line editor)
+  |-- control_panel.py     Settings UI (6 tabs: VAD/ASR, Translation, Style, Subtitle, Benchmark, Cache)
   |-- dialogs.py           Setup wizard, model download/load dialogs, ModelEditDialog
   |-- benchmark.py         Translation benchmark (BENCH_SENTENCES, run_benchmark())
   |-- log_window.py        Real-time log viewer
@@ -54,15 +56,31 @@ main.py (LiveTransApp)
 
 ### Model Config
 
-Each model in `user_settings.json` has: `name`, `api_base`, `api_key`, `model`, `proxy` ("none"/"system"/custom URL), optional `no_system_role` (bool, for APIs that reject system messages like Qwen-MT).
+Each model in `user_settings.json` has: `name`, `api_base`, `api_key`, `model`, `proxy` ("none"/"system"/custom URL), optional `no_system_role` (bool), optional `no_think` (bool), optional `input_price`/`output_price` (float, per 1M tokens).
 
-Proxy handling: `proxy="none"` uses `httpx.Client(trust_env=False)` to bypass system proxy; `proxy="system"` uses default httpx behavior (env vars).
+- `no_system_role`: Merges system prompt into user message for APIs that reject system role (e.g. Qwen-MT)
+- `no_think`: Passes `extra_body={"enable_thinking": False}` to disable reasoning for thinking models (Qwen3 etc.)
+- `input_price`/`output_price`: Token pricing for cost estimation displayed in MonitorBar
+- Proxy handling: `proxy="none"` uses `httpx.Client(trust_env=False)` to bypass system proxy; `proxy="system"` uses default httpx behavior (env vars)
+- Editing the active model in ModelEditDialog triggers `model_changed` signal to immediately apply changes
+
+### Subtitle Window (subtitle_window.py)
+
+Standalone transparent window for OBS capture, separate from the main overlay:
+- `SubtitleWindow`: Frameless, transparent, middle-click draggable, auto-hides after timeout
+- `_TextWidget`: QPainterPath-based outlined text rendering per line, with entry/exit animations
+- Each line has independent font, color, outline, alignment, animation settings
+- Long text auto-segments at punctuation/comma boundaries to fit window width
+- `desired_height()` always returns font-line-height (never 0), preventing window collapse when empty
+- Settings UI in `subtitle_settings.py`: grid layout, text lines as list with double-click edit dialog
 
 ### Overlay UI (subtitle_overlay.py)
 
 DragHandle is a 2-row header bar:
-- **Row 1**: Draggable title + action buttons (Paused/Running, Clear, Settings, Monitor, Quit)
-- **Row 2**: Checkboxes (Click-through, Top-most, Auto-scroll) + Model combo + Target Language combo
+- **Row 1**: Draggable title + action buttons (Hide, Subtitle, Paused/Running, Clear, Full/Compact, Settings, Quit)
+- **Row 2**: Checkboxes (Click-through, Top-most, Auto-scroll, Taskbar) + Model combo + Target Language combo
+
+MonitorBar displays: ASR device, CPU/RAM/GPU usage, ASR/TL counts, token usage with cost estimation (¥/$ based on UI language).
 
 Style system:
 - `DEFAULT_STYLE` and `STYLE_PRESETS` defined in `subtitle_overlay.py` — 14 presets including terminal themes (Dracula, Nord, Monokai, Solarized, Gruvbox, Tokyo Night, Catppuccin, One Dark, Everforest, Kanagawa)
@@ -85,6 +103,8 @@ Key overlay features:
 - **Slider special handling**: VAD/Energy sliders update labels in real-time but only trigger save on `sliderReleased` (mouse) or immediately for keyboard input (`isSliderDown()` check).
 - **Apply Prompt button**: Kept because TextEdit shouldn't trigger on every keystroke. Also persists to disk.
 - **Cache path**: Default `./models/` (not `~/.cache`). Applied at startup in `main.py` before `import torch` via `model_manager.apply_cache_env()`.
+- **Whisper group visibility**: Shows/hides download group when switching ASR engine; window auto-resizes via `sizeHint()`.
+- **QDoubleSpinBox precision**: All float values `round()` to 2 decimal places on save to avoid floating-point drift (e.g. `0.9999999999999992`).
 
 ### Startup Flow
 
@@ -93,6 +113,29 @@ Key overlay features:
 3. Non-first launch but models missing → `ModelDownloadDialog`: auto-download missing models
 4. All models ready → create main UI (overlay, panel, pipeline)
 5. Runtime ASR engine switch: if uncached → `ModelDownloadDialog`, then `_ModelLoadDialog` for GPU loading
+
+### Incremental ASR
+
+Continuous speech is processed incrementally to reduce latency (enabled by `incremental_asr` setting):
+
+- **Pipeline loop** checks `_do_interim_asr()` every ~1s while VAD is accumulating speech (buffer > `interim_interval`)
+- **Sentence splitting** via `pysbd` library (rule-based, 23 languages, ~0.08ms/call), with comma fallback:
+  - pysbd handles sentence-ending punctuation (。！？!?.) and language-specific rules (Mr./Dr., abbreviations)
+  - CJK comma `、` fallback at 25-char threshold (Japanese clause separator)
+  - Western comma `,，;；` fallback at 60-char threshold for long unsplit sentences
+  - Both fallbacks require `before > 15 chars` and `after > 3 chars` to avoid fragments
+- **Trim with safety margin**: After committing sentences, proportional audio trim + 0.3s margin to reduce echo; keeps ≥0.5s remainder
+- **Echo dedup**: `_strip_committed_overlap()` removes re-recognized text by matching committed tail against new text prefix
+- **Short utterance buffering**: Fragments ≤8 alnum chars buffered in `_interim_pending`, prepended to next sentence
+
+### VAD Behavior
+
+- **Progressive silence**: Buffer越长接受越短的停顿切分 (<3s=full, 3-6s=half, 6-10s=quarter of silence_limit)
+- **Adaptive silence**: Tracks recent pause durations, sets threshold to P75 × 1.2, auto-adjusts between 0.3s~2.0s
+- **Backtrack split**: Max duration时回溯smoothed confidence history找最低谷切分，remainder保留到下一段
+- **Speech density filter**: `_flush_segment()` discards segments where <25% of chunks are above confidence threshold
+- **Short segment merge**: Segments below `min_speech_duration` are NOT discarded — VAD does a soft-reset (`_is_speaking=False`) but keeps the buffer, which naturally merges with the next speech onset
+- **Trimmed segment handling**: `_was_trimmed` flag (set by `trim_front`) ensures interim ASR remainders are `force_flush()`ed instead of being dropped by min_speech check
 
 ### Key Patterns
 
@@ -107,19 +150,16 @@ Key overlay features:
 - `Translator` defaults to 10s timeout via `make_openai_client()` to prevent API calls from hanging indefinitely
 - Log window is created at startup but hidden; shown via tray menu "Show Log"
 - Audio chunk duration is 32ms (512 samples at 16kHz), matching Silero VAD's native window size for minimal latency
-- VAD adaptive silence mode: tracks recent pause durations, sets silence threshold to P75 × 1.2, auto-adjusts between 0.3s~2.0s
-- VAD progressive silence: buffer越长接受越短的停顿切分 (<3s=full, 3-6s=half, 6-10s=quarter of silence_limit)
-- VAD backtrack split: max duration时回溯confidence history找最低谷切分，remainder保留到下一段；三级策略（绝对低谷→相对低谷20%→低于均值兜底）
 - FunASR `disable_pbar=True` required in all `generate()` calls — tqdm crashes in GUI process when flushing stderr
 - ASR engine lifecycle: each engine exposes `unload()` (move to CPU + release) and `to_device(device)` (in-place migration). Device switching uses `to_device()` for PyTorch engines (SenseVoice/FunASR) and full reload for ctranslate2 (Whisper). Release order: `unload()` → `del` → `gc.collect()` → `torch.cuda.empty_cache()`
 - Qwen3-ASR: ONNX Encoder (DirectML) + llama.cpp GGUF Decoder (Vulkan). Model files auto-downloaded from GitHub Release. llama.cpp DLLs go in `qwen_asr_gguf/inference/bin/`. No PyTorch dependency at inference time. `to_device()` returns False (must reload). Context injection via `_context` field for continuous recognition accuracy.
 - Whisper (ctranslate2) only accepts `device="cuda"` not `"cuda:0"`; device index passed via `device_index` param. Parsed from combo text like `"cuda:0 (RTX 4090)"` in `_switch_asr_engine`
-- VAD speech density filter: `_flush_segment()` discards segments where <25% of chunks are above confidence threshold (noise rejection)
 - ASR text density filter: segments ≥2s producing ≤3 alnum characters are discarded as noise
 - Settings file uses atomic write (write to `.tmp` then `os.replace`) to prevent corruption on crash
 - `stop()` joins pipeline thread before flushing VAD to prevent concurrent `_process_segment` calls
 - Cancelled ASR download/failed load restores `_asr_ready` if old engine is still available
 - `Translator._build_system_prompt` catches format errors in user prompt templates, falls back to DEFAULT_PROMPT
+- Translation prompt presets: `PROMPT_PRESETS` in `translator.py` (daily/esports/anime), selectable via control panel combo
 
 ## Language & Style
 
