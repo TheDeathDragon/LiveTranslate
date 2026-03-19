@@ -177,7 +177,7 @@ class LiveTransApp:
         self._subwin = None
         self._panel = None
         self._pipeline_thread = None
-        self._tl_executor = ThreadPoolExecutor(max_workers=2)
+        self._tl_executor = ThreadPoolExecutor(max_workers=8)
 
         self._asr_count = 0
         self._translate_count = 0
@@ -186,6 +186,15 @@ class LiveTransApp:
         self._msg_id = 0
         self._last_original = ""
         self._last_msg_id = 0
+
+        # Incremental ASR state
+        self._incremental_enabled = True
+        self._interim_interval = 2.0
+        self._interim_pending = ""
+        self._interim_active = False
+        self._last_interim_samples = 0
+        self._last_interim_check_time = 0.0
+        self._interim_committed_tail = ""
 
     def set_overlay(self, overlay: SubtitleOverlay):
         self._overlay = overlay
@@ -253,6 +262,10 @@ class LiveTransApp:
                     self._overlay.update_monitor(0.0, 0.0)
         if "mic_device" in settings:
             self._audio.set_mic_device(settings["mic_device"])
+        if "incremental_asr" in settings:
+            self._incremental_enabled = settings["incremental_asr"]
+        if "interim_interval" in settings:
+            self._interim_interval = settings["interim_interval"]
         if "target_language" in settings:
             self._target_language = settings["target_language"]
             if self._overlay:
@@ -302,6 +315,12 @@ class LiveTransApp:
             return
         log.info(f"Switching ASR engine: {self._asr_type} -> {engine_type}")
         self._asr_ready = False
+        # Reset interim state
+        self._interim_active = False
+        self._interim_pending = ""
+        self._last_interim_samples = 0
+        self._last_interim_check_time = 0.0
+        self._interim_committed_tail = ""
         # Flush and reset VAD to stop accumulating audio during engine switch
         self._vad.flush()
         self._vad._reset()
@@ -495,7 +514,7 @@ class LiveTransApp:
         if self._running:
             return
         n = len(self._subwin.get_target_languages()) if self._subwin else 1
-        self._tl_executor = ThreadPoolExecutor(max_workers=n + 1)
+        self._tl_executor = ThreadPoolExecutor(max_workers=max(8, n + 1))
         self._running = True
         self._paused = False
         self._audio.start()
@@ -513,14 +532,29 @@ class LiveTransApp:
             self._pipeline_thread.join(timeout=3)
             self._pipeline_thread = None
         # Flush remaining VAD buffer after pipeline thread is done
-        remaining = self._vad.flush()
-        if remaining is not None and self._asr_ready:
-            self._process_segment(remaining)
+        if self._interim_active:
+            remaining = self._vad.force_flush()
+            if remaining is not None and self._asr_ready:
+                self._process_interim_final(remaining)
+        else:
+            remaining = self._vad.flush()
+            if remaining is not None and self._asr_ready:
+                self._process_segment(remaining)
+        self._interim_active = False
+        self._interim_pending = ""
+        self._last_interim_samples = 0
+        self._last_interim_check_time = 0.0
+        self._interim_committed_tail = ""
         self._tl_executor.shutdown(wait=False)
         log.info("Pipeline stopped")
 
     def pause(self):
         self._paused = True
+        self._interim_active = False
+        self._interim_pending = ""
+        self._last_interim_samples = 0
+        self._last_interim_check_time = 0.0
+        self._interim_committed_tail = ""
         if self._overlay:
             self._overlay.update_monitor(0.0, 0.0)
         log.info("Pipeline paused")
@@ -628,6 +662,262 @@ class LiveTransApp:
             except RuntimeError:
                 log.warning("Translation executor shut down, skipping")
 
+    # ── Incremental ASR ──
+
+    _SENTENCE_END_RE = None
+
+    @staticmethod
+    def _get_sentence_re():
+        if LiveTransApp._SENTENCE_END_RE is None:
+            import re
+            LiveTransApp._SENTENCE_END_RE = re.compile(r'(?<=[。！？!?.])\s*')
+        return LiveTransApp._SENTENCE_END_RE
+
+    def _split_sentences(self, text: str) -> list[str]:
+        """Split text on sentence-ending punctuation, with last-comma fallback."""
+        parts = self._get_sentence_re().split(text)
+        parts = [p for p in parts if p.strip()]
+        if len(parts) > 1:
+            return parts
+
+        # Fallback: split at LAST comma/semicolon (produces exactly 2 parts)
+        if len(text) > 40:
+            for i in range(len(text) - 8, 5, -1):
+                if text[i] in ',，;；':
+                    before = text[:i + 1].strip()
+                    after = text[i + 1:].strip()
+                    if before and after and len(after) > 3:
+                        return [before, after]
+
+        return parts
+
+    @staticmethod
+    def _is_short_utterance(text: str) -> bool:
+        """Check if text has ≤8 alphanumeric chars (likely noise/filler/fragment)."""
+        alnum = sum(1 for c in text if c.isalnum())
+        return alnum <= 8
+
+    def _strip_committed_overlap(self, text: str) -> str:
+        """Remove text that overlaps with previously committed content."""
+        if not self._interim_committed_tail:
+            return text
+        tail = self._interim_committed_tail.lower().rstrip()
+        text_lower = text.lower()
+        # Check if text starts with a suffix of the committed tail
+        max_check = min(len(tail), len(text_lower))
+        for overlap_len in range(max_check, 2, -1):
+            if text_lower[:overlap_len] == tail[-overlap_len:]:
+                stripped = text[overlap_len:].strip()
+                if stripped:
+                    log.debug(f"Stripped echo overlap ({overlap_len} chars): '{text[:overlap_len]}...'")
+                    return stripped
+                return ""
+        return text
+
+    def _do_interim_asr(self) -> bool:
+        """Run ASR on current VAD buffer, output complete sentences, trim consumed audio.
+        Returns True if any sentences were committed."""
+        peek = self._vad.peek_buffer()
+        if peek is None:
+            return False
+        audio, duration = peek
+
+        # Don't bother with very short buffers
+        if duration < 1.5:
+            return False
+
+        use_word_ts = self._asr_type == "whisper"
+
+        asr_start = time.perf_counter()
+        with self._asr_lock:
+            if not self._asr_ready or self._asr is None:
+                return False
+            try:
+                result = self._asr.transcribe(audio, word_timestamps=use_word_ts) if use_word_ts else self._asr.transcribe(audio)
+            except Exception as e:
+                log.error(f"Interim ASR error: {e}", exc_info=True)
+                return False
+        asr_ms = (time.perf_counter() - asr_start) * 1000
+
+        if result is None:
+            return False
+
+        full_text = result["text"].strip()
+        if not full_text or not any(c.isalnum() for c in full_text):
+            return False
+
+        # Strip echo from previous commit's overlap
+        full_text = self._strip_committed_overlap(full_text)
+        if not full_text:
+            return False
+
+        sentences = self._split_sentences(full_text)
+        if len(sentences) <= 1:
+            return False
+
+        # All but last are complete; last is still being spoken
+        complete = sentences[:-1]
+
+        committed_text = ""
+        for sent in complete:
+            committed_text += sent
+
+        if not committed_text.strip():
+            return False
+
+        # Determine trim point
+        total_samples = len(audio)
+        if use_word_ts and result.get("words"):
+            words = result["words"]
+            committed_lower = committed_text.lower().rstrip()
+            char_pos = 0
+            last_word_end = 0.0
+            for w in words:
+                word_text = w["word"].strip()
+                idx = committed_lower.find(word_text.lower(), char_pos)
+                if idx >= 0:
+                    char_pos = idx + len(word_text)
+                    last_word_end = w["end"]
+                if char_pos >= len(committed_lower):
+                    break
+            trim_samples = int(last_word_end * 16000)
+        else:
+            # Proportional trim — no overlap margin, dedup handles echoes
+            ratio = len(committed_text) / max(len(full_text), 1)
+            trim_samples = int(ratio * total_samples)
+            # Minimum trim to prevent re-recognition loops
+            min_trim = int(0.3 * 16000)
+            if trim_samples < min_trim and trim_samples > 0:
+                trim_samples = min(min_trim, total_samples // 2)
+
+        # Output committed sentences
+        actually_committed = False
+        for sent in complete:
+            text = sent.strip()
+            if not text:
+                continue
+            if self._is_short_utterance(text):
+                self._interim_pending += text
+                log.debug(f"Interim short utterance buffered: '{text}', pending='{self._interim_pending}'")
+                continue
+
+            if self._interim_pending:
+                text = self._interim_pending + text
+                self._interim_pending = ""
+
+            self._process_segment_text(text, result["language"], asr_ms)
+            actually_committed = True
+
+        if not actually_committed:
+            return False
+
+        # Trim consumed audio from VAD buffer
+        if trim_samples > 0:
+            self._vad.trim_front(trim_samples)
+
+        # Track committed text tail for echo dedup
+        self._interim_committed_tail = committed_text[-50:] if len(committed_text) > 50 else committed_text
+
+        self._interim_active = True
+        log.info(f"Interim ASR: committed {len(complete)} sentence(s), trimmed {trim_samples / 16000:.2f}s")
+        return True
+
+    def _process_segment_text(self, text: str, source_lang: str, asr_ms: float = 0):
+        """Output a text result (from interim or final) — similar to _process_segment but skips ASR."""
+        original_text = text.strip()
+        if not original_text or not any(c.isalnum() for c in original_text):
+            return
+
+        asr_lang_setting = self._panel.get_settings().get("asr_language", "auto") if self._panel else "auto"
+        if asr_lang_setting != "auto" and source_lang != asr_lang_setting:
+            log.info(f"Language filter: expected '{asr_lang_setting}' but got '{source_lang}', discarding: {original_text[:60]}")
+            return
+
+        self._asr_count += 1
+        self._msg_id += 1
+        msg_id = self._msg_id
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        log.info(f"ASR [{source_lang}] ({asr_ms:.0f}ms, interim): {original_text}")
+
+        if self._overlay:
+            self._overlay.add_message(msg_id, timestamp, original_text, source_lang, asr_ms)
+
+        self._last_original = original_text
+        self._last_msg_id = msg_id
+
+        target_lang = self._target_language
+        extra_langs = set()
+        if self._subwin and self._subwin.isVisible():
+            subwin_langs = self._subwin.get_target_languages()
+            extra_langs = subwin_langs - {target_lang, source_lang}
+
+        if source_lang == target_lang:
+            log.info(f"Same language ({source_lang}), no translation")
+            if self._overlay:
+                self._overlay.update_translation(msg_id, "", 0)
+                self._overlay.update_stats(self._asr_count, self._translate_count, self._total_prompt_tokens, self._total_completion_tokens)
+            if self._subwin and self._subwin.isVisible():
+                if extra_langs:
+                    try:
+                        self._tl_executor.submit(self._translate_subwin_only, original_text, source_lang, extra_langs)
+                    except RuntimeError:
+                        pass
+                else:
+                    self._subwin.update_text(original_text, {target_lang: original_text})
+        else:
+            try:
+                self._tl_executor.submit(self._translate_async, msg_id, original_text, source_lang, extra_langs or None)
+            except RuntimeError:
+                log.warning("Translation executor shut down, skipping")
+
+    def _process_interim_final(self, speech_segment):
+        """Handle VAD flush after interim outputs were already made."""
+        seg_len = len(speech_segment) / 16000
+        log.info(f"Interim final segment: {seg_len:.1f}s")
+
+        asr_start = time.perf_counter()
+        with self._asr_lock:
+            if not self._asr_ready or self._asr is None:
+                return
+            try:
+                result = self._asr.transcribe(speech_segment)
+            except Exception as e:
+                log.error(f"Interim final ASR error: {e}", exc_info=True)
+                return
+        asr_ms = (time.perf_counter() - asr_start) * 1000
+
+        if result is None:
+            # Flush any remaining pending
+            if self._interim_pending:
+                text = self._interim_pending
+                self._interim_pending = ""
+                lang = self._panel.get_settings().get("asr_language", "auto") if self._panel else "auto"
+                if lang == "auto":
+                    lang = "unknown"
+                self._process_segment_text(text, lang)
+            return
+
+        original_text = result["text"].strip()
+
+        # Strip echo from previous commit's overlap
+        original_text = self._strip_committed_overlap(original_text)
+
+        # Prepend any remaining pending short utterances
+        if self._interim_pending:
+            original_text = self._interim_pending + original_text
+            self._interim_pending = ""
+
+        if not original_text or not any(c.isalnum() for c in original_text):
+            return
+
+        # Apply noise filter like _process_segment
+        alnum_chars = sum(1 for c in original_text if c.isalnum())
+        if seg_len >= 2.0 and alnum_chars <= 3:
+            log.debug(f"Noise filter: {seg_len:.1f}s segment produced only '{original_text}', skipping")
+            return
+
+        self._process_segment_text(original_text, result["language"], asr_ms)
+
     def _pipeline_loop(self):
         silence_chunk = np.zeros(
             int(
@@ -659,14 +949,38 @@ class LiveTransApp:
                 self._overlay.update_monitor(rms, self._vad.last_confidence, mic_rms)
 
             speech_segment = self._vad.process_chunk(chunk)
+
             if speech_segment is None:
+                # Still accumulating — check for interim ASR
+                if (self._incremental_enabled and self._asr_ready
+                        and self._vad._is_speaking):
+                    buf_samples = self._vad._speech_samples
+                    total_dur = buf_samples / 16000
+                    elapsed = (buf_samples - self._last_interim_samples) / 16000
+                    now = time.perf_counter()
+                    cooldown = now - self._last_interim_check_time
+                    if total_dur >= self._interim_interval and elapsed >= self._interim_interval and cooldown >= 1.0:
+                        self._last_interim_check_time = now
+                        committed = self._do_interim_asr()
+                        if committed:
+                            self._last_interim_samples = self._vad._speech_samples
                 continue
 
             if not self._asr_ready:
                 log.debug("ASR not ready, dropping segment")
                 continue
 
-            self._process_segment(speech_segment)
+            # VAD flushed — handle final segment
+            if self._interim_active:
+                self._process_interim_final(speech_segment)
+            else:
+                self._process_segment(speech_segment)
+            # Reset interim state
+            self._interim_active = False
+            self._interim_pending = ""
+            self._last_interim_samples = 0
+            self._last_interim_check_time = 0.0
+            self._interim_committed_tail = ""
 
 
 def main():

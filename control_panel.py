@@ -69,6 +69,8 @@ _VALID_KEYS = {
     "ui_lang",
     "style",
     "subtitle_mode",
+    "incremental_asr",
+    "interim_interval",
 }
 
 
@@ -428,6 +430,28 @@ class ControlPanel(QWidget):
         timing_layout.addWidget(self._silence_mode, 2, 1)
         timing_layout.addWidget(QLabel(t("label_silence_dur")), 3, 0)
         timing_layout.addWidget(self._silence_duration, 3, 1)
+
+        from PyQt6.QtWidgets import QCheckBox
+
+        self._incremental_asr_cb = QCheckBox(t("label_incremental_asr"))
+        self._incremental_asr_cb.setToolTip(t("incremental_asr_tooltip"))
+        self._incremental_asr_cb.setChecked(s.get("incremental_asr", True))
+        self._incremental_asr_cb.toggled.connect(self._on_timing_changed)
+        self._incremental_asr_cb.toggled.connect(self._auto_save)
+        timing_layout.addWidget(self._incremental_asr_cb, 4, 0)
+
+        self._interim_interval_spin = QDoubleSpinBox()
+        self._interim_interval_spin.setRange(1.0, 10.0)
+        self._interim_interval_spin.setSingleStep(0.5)
+        self._interim_interval_spin.setValue(s.get("interim_interval", 2.0))
+        self._interim_interval_spin.setSuffix(" s")
+        self._interim_interval_spin.setEnabled(s.get("incremental_asr", True))
+        self._interim_interval_spin.valueChanged.connect(self._on_timing_changed)
+        self._interim_interval_spin.valueChanged.connect(self._auto_save)
+        self._incremental_asr_cb.toggled.connect(self._interim_interval_spin.setEnabled)
+        timing_layout.addWidget(QLabel(t("label_interim_interval")), 5, 0)
+        timing_layout.addWidget(self._interim_interval_spin, 5, 1)
+
         layout.addWidget(timing_group)
 
         layout.addStretch()
@@ -1174,6 +1198,8 @@ class ControlPanel(QWidget):
             "auto" if self._silence_mode.currentIndex() == 0 else "fixed"
         )
         self._current_settings["silence_duration"] = self._silence_duration.value()
+        self._current_settings["incremental_asr"] = self._incremental_asr_cb.isChecked()
+        self._current_settings["interim_interval"] = self._interim_interval_spin.value()
 
     def _on_ui_lang_changed(self, index):
         lang = "en" if index == 0 else "zh"

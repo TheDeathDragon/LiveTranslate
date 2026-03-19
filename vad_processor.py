@@ -325,6 +325,41 @@ class VADProcessor:
         self._is_speaking = False
         self._silence_counter = 0
 
+    def peek_buffer(self):
+        """Read current speech buffer without flushing. Returns (audio, duration) or None."""
+        if not self._speech_buffer or not self._is_speaking:
+            return None
+        audio = np.concatenate(self._speech_buffer)
+        duration = self._speech_samples / self.sample_rate
+        return audio, duration
+
+    def trim_front(self, n_samples: int):
+        """Remove first n_samples from the speech buffer."""
+        if n_samples <= 0:
+            return
+        removed = 0
+        while self._speech_buffer and removed < n_samples:
+            chunk = self._speech_buffer[0]
+            if removed + len(chunk) <= n_samples:
+                self._speech_buffer.pop(0)
+                self._confidence_history.pop(0)
+                removed += len(chunk)
+            else:
+                # Partial trim of first chunk
+                keep = removed + len(chunk) - n_samples
+                self._speech_buffer[0] = chunk[-keep:]
+                removed = n_samples
+        self._speech_samples = sum(len(b) for b in self._speech_buffer)
+        log.debug(f"trim_front: removed {removed} samples, remaining {self._speech_samples / self.sample_rate:.2f}s")
+
+    def force_flush(self):
+        """Flush buffer regardless of min_speech_samples."""
+        if not self._speech_buffer:
+            return None
+        segment = np.concatenate(self._speech_buffer)
+        self._reset()
+        return segment
+
     def flush(self):
         if self._speech_samples >= self.min_speech_samples:
             return self._flush_segment()
