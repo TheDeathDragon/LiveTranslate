@@ -46,7 +46,6 @@ from PyQt6.QtCore import QTimer, Qt
 
 from subtitle_overlay import SubtitleOverlay
 from subtitle_window import SubtitleWindow
-from subtitle_settings import SubtitleSettingsDialog
 from log_window import LogWindow
 from control_panel import (
     ControlPanel,
@@ -787,10 +786,20 @@ def main():
     # --- Show/hide overlay ---
     overlay_toggle_action = QAction(t("tray_hide_overlay"))
 
+    _hide_notified = [False]
+
     def on_toggle_overlay():
         if overlay.isVisible():
             overlay.hide()
             overlay_toggle_action.setText(t("tray_show_overlay"))
+            if not _hide_notified[0]:
+                _hide_notified[0] = True
+                tray.showMessage(
+                    "LiveTrans",
+                    t("hide_tray_hint"),
+                    QSystemTrayIcon.MessageIcon.Information,
+                    3000,
+                )
         else:
             overlay.show()
             overlay.raise_()
@@ -798,6 +807,82 @@ def main():
 
     overlay_toggle_action.triggered.connect(on_toggle_overlay)
     menu.addAction(overlay_toggle_action)
+
+    # --- Subtitle window toggle ---
+    subwin_toggle_action = QAction(t("subwin_show"), checkable=True)
+
+    def _save_subwin_state():
+        settings = panel.get_settings()
+        sm = settings.get("subtitle_mode") or {}
+        sm["enabled"] = subwin.isVisible()
+        pos = subwin.pos()
+        sm["window_x"] = pos.x()
+        sm["window_y"] = pos.y()
+        settings["subtitle_mode"] = sm
+        panel._current_settings["subtitle_mode"] = sm
+        _save_settings(settings)
+
+    def on_toggle_subwin(checked):
+        if checked:
+            subwin.show()
+            subwin.raise_()
+        else:
+            subwin.hide()
+        overlay.set_subtitle_checked(checked)
+        _save_subwin_state()
+
+    subwin_toggle_action.toggled.connect(on_toggle_subwin)
+    subwin.position_changed.connect(_save_subwin_state)
+
+    # Sync when subtitle window is manually closed (e.g. Alt+F4)
+    def _on_subwin_closed():
+        subwin_toggle_action.blockSignals(True)
+        subwin_toggle_action.setChecked(False)
+        subwin_toggle_action.blockSignals(False)
+        overlay.set_subtitle_checked(False)
+        _save_subwin_state()
+
+    subwin.window_closed.connect(_on_subwin_closed)
+
+    # Restore subtitle window visibility from saved state
+    if subwin_was_enabled:
+        subwin_toggle_action.setChecked(True)
+
+    menu.addAction(subwin_toggle_action)
+
+    # Connect overlay subtitle button
+    def _on_overlay_subtitle_toggle():
+        subwin_toggle_action.setChecked(not subwin_toggle_action.isChecked())
+
+    overlay.subtitle_toggled.connect(_on_overlay_subtitle_toggle)
+
+    # Connect panel subtitle settings changes
+    def _on_panel_subtitle_changed(s):
+        subwin.apply_settings(s)
+
+    panel.subtitle_settings_changed.connect(_on_panel_subtitle_changed)
+
+    # Edit mode: panel ↔ subtitle window
+    panel.subtitle_edit_mode_changed.connect(subwin.set_edit_mode)
+
+    def _on_subwin_edit_mode(enabled):
+        panel._subtitle_widget.set_edit_mode(enabled)
+
+    subwin.edit_mode_changed.connect(_on_subwin_edit_mode)
+
+    # Sync width from subtitle window resize back to settings
+    def _on_subwin_size_changed(new_width):
+        settings = panel.get_settings()
+        sm = settings.get("subtitle_mode") or {}
+        sm["window_width"] = new_width
+        settings["subtitle_mode"] = sm
+        panel._current_settings["subtitle_mode"] = sm
+        _save_settings(settings)
+        panel._subtitle_widget.update_settings(sm)
+
+    subwin.size_changed.connect(_on_subwin_size_changed)
+
+    menu.addSeparator()
 
     # --- Show log / panel ---
     log_action = QAction(t("tray_show_log"))
@@ -819,8 +904,8 @@ def main():
 
     log_action.triggered.connect(on_toggle_log)
     panel_action.triggered.connect(on_toggle_panel)
-    menu.addAction(log_action)
     menu.addAction(panel_action)
+    menu.addAction(log_action)
     menu.addSeparator()
 
     # --- Overlay submenu (click-through, topmost, auto-scroll, taskbar) ---
@@ -858,67 +943,6 @@ def main():
     overlay_menu.addAction(autoscroll_action)
     overlay_menu.addAction(taskbar_action)
     menu.addMenu(overlay_menu)
-
-    # --- Subtitle mode ---
-    subwin_menu = QMenu(t("subwin_mode"))
-
-    subwin_toggle_action = QAction(t("subwin_show"), checkable=True)
-
-    def _save_subwin_state():
-        settings = panel.get_settings()
-        sm = settings.get("subtitle_mode") or {}
-        sm["enabled"] = subwin.isVisible()
-        pos = subwin.pos()
-        sm["window_x"] = pos.x()
-        sm["window_y"] = pos.y()
-        settings["subtitle_mode"] = sm
-        panel._current_settings["subtitle_mode"] = sm
-        _save_settings(settings)
-
-    def on_toggle_subwin(checked):
-        if checked:
-            subwin.show()
-            subwin.raise_()
-            subwin_toggle_action.setText(t("subwin_hide"))
-        else:
-            subwin.hide()
-            subwin_toggle_action.setText(t("subwin_show"))
-        _save_subwin_state()
-
-    subwin_toggle_action.toggled.connect(on_toggle_subwin)
-    subwin.position_changed.connect(_save_subwin_state)
-    subwin_menu.addAction(subwin_toggle_action)
-
-    # Restore subtitle window visibility from saved state
-    if subwin_was_enabled:
-        subwin_toggle_action.setChecked(True)
-
-    subwin_settings_action = QAction(t("subwin_settings"))
-
-    _subwin_dlg = [None]
-
-    def on_subwin_settings():
-        if _subwin_dlg[0] and _subwin_dlg[0].isVisible():
-            _subwin_dlg[0].raise_()
-            return
-        current = (panel.get_settings() or {}).get("subtitle_mode") or {}
-        dlg = SubtitleSettingsDialog(current, parent=None)
-
-        def _on_changed(s):
-            subwin.apply_settings(s)
-            settings = panel.get_settings()
-            settings["subtitle_mode"] = s
-            panel._current_settings["subtitle_mode"] = s
-            _save_settings(settings)
-
-        dlg.settings_changed.connect(_on_changed)
-        dlg.show()
-        _subwin_dlg[0] = dlg
-
-    subwin_settings_action.triggered.connect(on_subwin_settings)
-    subwin_menu.addAction(subwin_settings_action)
-
-    menu.addMenu(subwin_menu)
 
     # --- Model submenu ---
     model_menu = QMenu(t("tray_menu_model"))

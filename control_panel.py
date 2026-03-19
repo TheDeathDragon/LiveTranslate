@@ -39,6 +39,7 @@ from model_manager import (
     get_cache_entries,
 )
 from i18n import t, LANGUAGES
+from subtitle_settings import SubtitleSettingsWidget
 
 log = logging.getLogger("LiveTrans.Panel")
 
@@ -106,6 +107,8 @@ class ControlPanel(QWidget):
     settings_changed = pyqtSignal(dict)
     model_changed = pyqtSignal(dict)
     models_list_changed = pyqtSignal(list, int)
+    subtitle_settings_changed = pyqtSignal(dict)
+    subtitle_edit_mode_changed = pyqtSignal(bool)
     _bench_result = pyqtSignal(str)
     _cache_result = pyqtSignal(list)
 
@@ -162,6 +165,7 @@ class ControlPanel(QWidget):
         tabs.addTab(self._create_vad_tab(), t("tab_vad_asr"))
         tabs.addTab(self._create_translation_tab(), t("tab_translation"))
         tabs.addTab(self._create_style_tab(), t("tab_style"))
+        tabs.addTab(self._create_subtitle_tab(), t("tab_subtitle"))
         tabs.addTab(self._create_benchmark_tab(), t("tab_benchmark"))
         self._cache_tab_index = tabs.addTab(self._create_cache_tab(), t("tab_cache"))
         tabs.currentChanged.connect(self._on_tab_changed)
@@ -824,6 +828,24 @@ class ControlPanel(QWidget):
             self._window_opacity,
         ):
             w.blockSignals(block)
+
+    # ── Subtitle Tab ──
+
+    def _create_subtitle_tab(self):
+        subtitle_settings = self._current_settings.get("subtitle_mode") or {}
+        self._subtitle_widget = SubtitleSettingsWidget(subtitle_settings)
+        self._subtitle_widget.settings_changed.connect(self._on_subtitle_settings_changed)
+        self._subtitle_widget.edit_mode_changed.connect(self.subtitle_edit_mode_changed.emit)
+        return self._subtitle_widget
+
+    def _on_subtitle_settings_changed(self, s):
+        self._current_settings["subtitle_mode"] = s
+        self._auto_save()
+        self.subtitle_settings_changed.emit(s)
+
+    def update_subtitle_settings(self, s):
+        self._current_settings["subtitle_mode"] = s
+        self._subtitle_widget.update_settings(s)
 
     # ── Benchmark Tab ──
 

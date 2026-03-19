@@ -295,6 +295,8 @@ class ChatMessage(QWidget):
         copy_orig = menu.addAction(t("copy_original"))
         copy_trans = menu.addAction(t("copy_translation"))
         copy_all = menu.addAction(t("copy_all"))
+        menu.addSeparator()
+        clear_list = menu.addAction(t("clear_list"))
         action = menu.exec(event.globalPos())
         if action == copy_orig:
             QApplication.clipboard().setText(self._original)
@@ -302,6 +304,10 @@ class ChatMessage(QWidget):
             QApplication.clipboard().setText(self._translated)
         elif action == copy_all:
             QApplication.clipboard().setText(f"{self._original}\n{self._translated}")
+        elif action == clear_list:
+            overlay = self.window()
+            if hasattr(overlay, '_on_clear'):
+                overlay._on_clear()
 
 
 def _escape(text: str) -> str:
@@ -370,7 +376,7 @@ class MonitorBar(QWidget):
         self._mic_bar.setVisible(False)
         row1.addWidget(self._mic_bar)
 
-        rms_lbl = QLabel("RMS")
+        rms_lbl = QLabel("RMS:")
         rms_lbl.setFixedWidth(26)
         rms_lbl.setFont(QFont("Consolas", 8))
         rms_lbl.setStyleSheet("color: #888; background: transparent;")
@@ -384,7 +390,7 @@ class MonitorBar(QWidget):
         self._rms_bar.setStyleSheet(_BAR_CSS_TPL.format(color="#4ec9b0"))
         row1.addWidget(self._rms_bar)
 
-        vad_lbl = QLabel("VAD")
+        vad_lbl = QLabel("VAD:")
         vad_lbl.setFixedWidth(26)
         vad_lbl.setFont(QFont("Consolas", 8))
         vad_lbl.setStyleSheet("color: #888; background: transparent;")
@@ -538,7 +544,7 @@ class DragHandle(QWidget):
     """Top bar: row1=title+buttons, row2=checkboxes+combos."""
 
     settings_clicked = pyqtSignal()
-    monitor_toggled = pyqtSignal(bool)
+    subtitle_clicked = pyqtSignal()
     click_through_toggled = pyqtSignal(bool)
     topmost_toggled = pyqtSignal(bool)
     auto_scroll_toggled = pyqtSignal(bool)
@@ -590,19 +596,21 @@ class DragHandle(QWidget):
                 b.setToolTip(tip)
             return b
 
-        hide_btn = _btn(t("tray_hide_overlay"))
+        hide_btn = _btn(t("hide"))
         hide_btn.clicked.connect(self.hide_clicked.emit)
         row1.addWidget(hide_btn)
 
+        self._subtitle_btn = _btn(t("subtitle"))
+        self._subtitle_btn.clicked.connect(self.subtitle_clicked.emit)
+        row1.addWidget(self._subtitle_btn)
+
         self._running = False
         self._start_stop_btn = _btn(t("paused"))
-        self._start_stop_btn.setFixedWidth(56)
         self._start_stop_btn.clicked.connect(self._on_start_stop)
         row1.addWidget(self._start_stop_btn)
 
         # Mode toggle button
         self._mode_btn = _btn(t("mode_full"))
-        self._mode_btn.setFixedWidth(68)
         self._mode_btn.clicked.connect(self._toggle_mode)
         row1.addWidget(self._mode_btn)
 
@@ -613,11 +621,6 @@ class DragHandle(QWidget):
         settings_btn = _btn(t("settings"))
         settings_btn.clicked.connect(self.settings_clicked.emit)
         row1.addWidget(settings_btn)
-
-        self._monitor_expanded = True
-        self._monitor_btn = _btn(t("monitor"))
-        self._monitor_btn.clicked.connect(self._toggle_monitor)
-        row1.addWidget(self._monitor_btn)
 
         quit_btn = _btn(t("quit"))
         quit_btn.setStyleSheet(
@@ -768,7 +771,7 @@ class DragHandle(QWidget):
         compact = mode == "compact"
         self._row2_widget.setVisible(not compact)
         self._clear_btn.setVisible(not compact)
-        self._monitor_btn.setVisible(not compact)
+        self._subtitle_btn.setVisible(not compact)
         self._mode_btn.setText(t("mode_compact") if compact else t("mode_full"))
         self.setFixedHeight(24 if compact else 62)
 
@@ -776,9 +779,12 @@ class DragHandle(QWidget):
         if mode != self._mode:
             self._apply_mode(mode)
 
-    def _toggle_monitor(self):
-        self._monitor_expanded = not self._monitor_expanded
-        self.monitor_toggled.emit(self._monitor_expanded)
+    def set_subtitle_checked(self, checked: bool):
+        self._subtitle_btn.setStyleSheet(
+            _BTN_CSS.replace("rgba(255,255,255,20)", "rgba(80,180,80,40)").replace(
+                "rgba(255,255,255,40)", "rgba(80,180,80,80)"
+            ) if checked else _BTN_CSS
+        )
 
 
 class SubtitleOverlay(QWidget):
@@ -799,6 +805,7 @@ class SubtitleOverlay(QWidget):
     stop_requested = pyqtSignal()
     hide_requested = pyqtSignal()
     quit_requested = pyqtSignal()
+    subtitle_toggled = pyqtSignal()
     mode_changed = pyqtSignal(str)  # "full" or "compact"
 
     def __init__(self, config):
@@ -851,7 +858,7 @@ class SubtitleOverlay(QWidget):
         # Drag handle
         self._handle = DragHandle()
         self._handle.settings_clicked.connect(self.settings_requested.emit)
-        self._handle.monitor_toggled.connect(self._on_monitor_toggled)
+        self._handle.subtitle_clicked.connect(self.subtitle_toggled.emit)
         self._handle.click_through_toggled.connect(self._set_click_through)
         self._handle.topmost_toggled.connect(self._set_topmost)
         self._handle.taskbar_toggled.connect(self._set_taskbar)
@@ -967,7 +974,7 @@ class SubtitleOverlay(QWidget):
 
     def _on_mode_changed(self, mode: str):
         compact = mode == "compact"
-        self._monitor.setVisible(not compact and self._handle._monitor_expanded)
+        self._monitor.setVisible(not compact)
         ChatMessage._compact_mode = compact
         s = ChatMessage._current_style
         for msg in self._messages.values():
@@ -977,8 +984,8 @@ class SubtitleOverlay(QWidget):
     def set_mode(self, mode: str):
         self._handle.set_mode(mode)
 
-    def _on_monitor_toggled(self, expanded: bool):
-        self._monitor.setVisible(expanded)
+    def set_subtitle_checked(self, checked: bool):
+        self._handle.set_subtitle_checked(checked)
 
     @pyqtSlot(float, float, object)
     def _on_update_monitor(self, rms: float, vad_conf: float, mic_rms):
