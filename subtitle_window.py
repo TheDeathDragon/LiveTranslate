@@ -65,7 +65,6 @@ DEFAULT_SUBTITLE_WIN_SETTINGS = {
             "outline_width": 2,
             "align": "center",
             "bg_image": "",
-            "scroll_speed": 60,
             "entry_animation": "none",
             "exit_animation": "none",
             "animation_duration": 300,
@@ -83,7 +82,6 @@ DEFAULT_SUBTITLE_WIN_SETTINGS = {
             "outline_width": 2,
             "align": "center",
             "bg_image": "",
-            "scroll_speed": 60,
             "entry_animation": "none",
             "exit_animation": "none",
             "animation_duration": 300,
@@ -127,14 +125,6 @@ class _SubtitleTextWidget(QWidget):
         self._bg_pixmap = None
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
 
-        self._render_font = None  # Auto-shrunk font when text exceeds width
-
-        # Scroll state
-        self._scroll_offset_val = 0.0
-        self._scroll_speed = 60  # px/s
-        self._scroll_anim = None
-        self._scroll_delay_timer = None
-
         # Animation state
         self._content_opacity_val = 1.0
         self._slide_offset_x_val = 0.0
@@ -144,16 +134,6 @@ class _SubtitleTextWidget(QWidget):
         self._animation_duration = 300
         self._anim_group = None
         self._pending_text = None
-
-    # --- pyqtProperty for scroll ---
-    def _get_scroll_offset(self):
-        return self._scroll_offset_val
-
-    def _set_scroll_offset(self, val):
-        self._scroll_offset_val = val
-        self.update()
-
-    scroll_offset = pyqtProperty(float, _get_scroll_offset, _set_scroll_offset)
 
     # --- pyqtProperty for content opacity ---
     def _get_content_opacity(self):
@@ -185,7 +165,6 @@ class _SubtitleTextWidget(QWidget):
     slide_offset_y = pyqtProperty(float, _get_slide_offset_y, _set_slide_offset_y)
 
     def set_config(self, cfg: dict):
-        self._render_font = None
         self._font = QFont(cfg.get("font_family", "Microsoft YaHei"), cfg.get("font_size", 24))
         c = QColor(cfg.get("color", "#FFFFFF"))
         c.setAlpha(cfg.get("opacity", 255))
@@ -196,7 +175,6 @@ class _SubtitleTextWidget(QWidget):
         self._align = cfg.get("align", "center")
         resolved = _resolve_image_path(cfg.get("bg_image", ""))
         self._bg_pixmap = QPixmap(resolved) if resolved else None
-        self._scroll_speed = cfg.get("scroll_speed", 60)
         self._entry_animation = cfg.get("entry_animation", "none")
         self._exit_animation = cfg.get("exit_animation", "none")
         self._animation_duration = cfg.get("animation_duration", 300)
@@ -208,7 +186,6 @@ class _SubtitleTextWidget(QWidget):
         if self._text and text != self._text and self._exit_animation != "none":
             self._pending_text = text
             self._stop_all_animations()
-            self._scroll_offset_val = 0.0
             self.animate_out(callback=self._apply_pending_text)
             return
 
@@ -225,37 +202,27 @@ class _SubtitleTextWidget(QWidget):
         self._content_opacity_val = 1.0
         self._slide_offset_x_val = 0.0
         self._slide_offset_y_val = 0.0
-        self._scroll_offset_val = 0.0
         self._pending_text = None
 
         self._text = text
-        self._render_font = None
         self._update_height()
         self.update()
 
         if text:
-            self.animate_in(then_scroll=True)
+            self.animate_in()
 
     def _stop_all_animations(self):
         if self._anim_group and self._anim_group.state() != self._anim_group.State.Stopped:
             self._anim_group.stop()
         self._anim_group = None
-        if self._scroll_anim and self._scroll_anim.state() != self._scroll_anim.State.Stopped:
-            self._scroll_anim.stop()
-        self._scroll_anim = None
-        if self._scroll_delay_timer:
-            self._scroll_delay_timer.stop()
-            self._scroll_delay_timer = None
 
-    def animate_in(self, then_scroll=False):
+    def animate_in(self):
         anim_type = self._entry_animation
         if anim_type == "none":
             self._content_opacity_val = 1.0
             self._slide_offset_x_val = 0.0
             self._slide_offset_y_val = 0.0
             self.update()
-            if then_scroll:
-                self._start_scroll()
             return
 
         dur = self._animation_duration
@@ -304,10 +271,6 @@ class _SubtitleTextWidget(QWidget):
         self._content_opacity_val = 0.0
         self.update()
         self._anim_group = group
-
-        if then_scroll:
-            group.finished.connect(self._start_scroll)
-
         group.start()
 
     def animate_out(self, callback=None, anim_type=None, duration=None):
@@ -371,30 +334,53 @@ class _SubtitleTextWidget(QWidget):
         self._anim_group = group
         group.start()
 
-    def _start_scroll(self):
-        """Auto-shrink font to fit text within available width instead of scrolling."""
-        if not self._text or self._scroll_speed <= 0:
-            return
+    def text_overflows(self, text: str) -> bool:
+        """Check if text would overflow this widget's available width."""
+        if not text:
+            return False
         fm = QFontMetrics(self._font)
-        text_w = fm.horizontalAdvance(self._text)
         ow = self._outline_width if self._outline_enabled else 0
         avail_w = self.width() - ow * 2
-        if text_w <= avail_w or avail_w <= 0:
-            return
-        # Shrink font to fit (minimum 50% of original size)
-        scale = avail_w / text_w
-        scale = max(scale, 0.5)
-        new_size = max(int(self._font.pointSize() * scale), 8)
-        self._render_font = QFont(self._font)
-        self._render_font.setPointSize(new_size)
-        self._update_height()
-        self.update()
+        return avail_w > 0 and fm.horizontalAdvance(text) > avail_w
+
+    def split_text(self, text: str) -> list:
+        """Split text into segments that fit within available width."""
+        fm = QFontMetrics(self._font)
+        ow = self._outline_width if self._outline_enabled else 0
+        avail_w = self.width() - ow * 2
+        if avail_w <= 0 or fm.horizontalAdvance(text) <= avail_w:
+            return [text]
+
+        segments = []
+        while text:
+            if fm.horizontalAdvance(text) <= avail_w:
+                segments.append(text)
+                break
+
+            best = 0
+            for i in range(1, len(text) + 1):
+                if fm.horizontalAdvance(text[:i]) > avail_w:
+                    break
+                best = i
+            if best == 0:
+                best = 1
+
+            # Prefer breaking at word/punctuation boundary
+            break_at = best
+            for j in range(best - 1, max(best // 2, 0), -1):
+                if text[j] in ' ,，。、!！?？;；:：.':
+                    break_at = j + 1
+                    break
+
+            segments.append(text[:break_at].rstrip())
+            text = text[break_at:].lstrip()
+
+        return segments or [text]
 
     def desired_height(self) -> int:
         if not self._text:
             return 0
-        font = self._render_font or self._font
-        fm = QFontMetrics(font)
+        fm = QFontMetrics(self._font)
         ow = self._outline_width if self._outline_enabled else 0
         # Single line only (no wrapping)
         return fm.lineSpacing() + ow * 2 + 4
@@ -404,12 +390,7 @@ class _SubtitleTextWidget(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        # Recalculate auto-shrink font on resize
-        self._render_font = None
-        if self._text:
-            self._start_scroll()
-        else:
-            self._update_height()
+        self._update_height()
 
     def paintEvent(self, event):
         if not self._text:
@@ -421,8 +402,7 @@ class _SubtitleTextWidget(QWidget):
         if self._bg_pixmap and not self._bg_pixmap.isNull():
             painter.drawPixmap(self.rect(), self._bg_pixmap)
 
-        font = self._render_font or self._font
-        fm = QFontMetrics(font)
+        fm = QFontMetrics(self._font)
         ow = self._outline_width if self._outline_enabled else 0
 
         # Clip to widget bounds
@@ -445,7 +425,7 @@ class _SubtitleTextWidget(QWidget):
         lx += offset_x
 
         path = QPainterPath()
-        path.addText(lx, y, font, self._text)
+        path.addText(lx, y, self._font, self._text)
 
         if self._outline_enabled and self._outline_width > 0:
             pen = QPen(self._outline_color, self._outline_width * 2,
@@ -484,6 +464,8 @@ class SubtitleWindow(QWidget):
         self._auto_hide_timer.setSingleShot(True)
         self._auto_hide_timer.timeout.connect(self._on_auto_hide_timeout)
         self._is_hidden_by_timeout = False
+        # Pending overflow segments for delayed insertion
+        self._pending_segment_timers = []
 
         self._setup_ui()
         self.update_text_signal.connect(self._on_update_text)
@@ -654,7 +636,7 @@ class SubtitleWindow(QWidget):
             old_dur = tw._animation_duration
             tw._entry_animation = restore_type if restore_type != "none" else "fade"
             tw._animation_duration = duration
-            tw.animate_in(then_scroll=False)
+            tw.animate_in()
             tw._entry_animation = old_entry
             tw._animation_duration = old_dur
 
@@ -705,19 +687,118 @@ class SubtitleWindow(QWidget):
     @pyqtSlot(str, str)
     def _on_update_text(self, original: str, translations_json: str):
         translations = json.loads(translations_json)
+        self._cancel_pending_segments()
+
+        # Split overflow text into multiple sentences
+        segments = self._split_overflow(original, translations)
+
+        # Insert first segment immediately
+        self._insert_sentence(segments[0][0], segments[0][1])
+
+        # Schedule remaining segments with 3s delay each
+        for i, (orig, trans) in enumerate(segments[1:], 1):
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.setInterval(i * 3000)
+            timer.timeout.connect(lambda o=orig, t=trans: self._insert_sentence(o, t))
+            timer.start()
+            self._pending_segment_timers.append(timer)
+
+    def _insert_sentence(self, original: str, translations: dict):
+        """Insert a single sentence and refresh display."""
         max_sentences = self._settings.get("sentences", 1)
         self._sentences.append((original, translations))
         if len(self._sentences) > max_sentences:
             self._sentences = self._sentences[-max_sentences:]
 
-        # Restore from auto-hide if needed
         if self._is_hidden_by_timeout:
             self._restore_from_auto_hide()
 
         self._refresh_display()
-
-        # Reset auto-hide timer
         self._restart_auto_hide_timer()
+
+    def _cancel_pending_segments(self):
+        """Cancel any pending delayed segment insertions."""
+        for timer in self._pending_segment_timers:
+            timer.stop()
+            timer.deleteLater()
+        self._pending_segment_timers.clear()
+
+    def _split_overflow(self, original: str, translations: dict) -> list:
+        """Split text into segments if any line overflows.
+
+        Returns list of (original, translations) tuples.
+        """
+        lines_cfg = [ln for ln in self._settings.get("lines", []) if ln.get("enabled", True)]
+        if not self._text_widgets:
+            return [(original, translations)]
+
+        # Collect texts and their corresponding text widgets
+        line_texts = []
+        for i, cfg in enumerate(lines_cfg):
+            if i >= len(self._text_widgets):
+                break
+            tw = self._text_widgets[i]
+            line_type = cfg.get("type", "original")
+            if line_type == "original":
+                line_texts.append((tw, original, "original", None))
+            else:
+                lang = cfg.get("lang", "")
+                text = ""
+                if isinstance(translations, str):
+                    text = translations
+                elif lang and lang in translations:
+                    text = translations[lang]
+                elif "" in translations:
+                    text = translations[""]
+                else:
+                    for v in translations.values():
+                        if v:
+                            text = v
+                            break
+                line_texts.append((tw, text, "translation", lang))
+
+        # Check if any line overflows
+        max_segments = 1
+        split_cache = {}
+        for tw, text, ltype, lang in line_texts:
+            if text and tw.text_overflows(text):
+                segs = tw.split_text(text)
+                split_cache[(ltype, lang)] = segs
+                max_segments = max(max_segments, len(segs))
+
+        if max_segments <= 1:
+            return [(original, translations)]
+
+        # Split original if needed
+        if ("original", None) in split_cache:
+            orig_segs = split_cache[("original", None)]
+        else:
+            orig_segs = [original]
+        # Pad to max_segments
+        while len(orig_segs) < max_segments:
+            orig_segs.append("")
+
+        # Build translation segments per language
+        result = []
+        for seg_i in range(max_segments):
+            trans_seg = {}
+            for key in translations:
+                cache_key = ("translation", key)
+                if cache_key in split_cache:
+                    segs = split_cache[cache_key]
+                    trans_seg[key] = segs[seg_i] if seg_i < len(segs) else ""
+                else:
+                    # Check fallback key
+                    cache_key_fb = ("translation", None)
+                    if cache_key_fb in split_cache and key == "":
+                        segs = split_cache[cache_key_fb]
+                        trans_seg[key] = segs[seg_i] if seg_i < len(segs) else ""
+                    else:
+                        trans_seg[key] = translations[key] if seg_i == 0 else ""
+            result.append((orig_segs[seg_i], trans_seg))
+
+        return result
 
     def _refresh_display(self):
         if not self._sentences:
@@ -773,6 +854,7 @@ class SubtitleWindow(QWidget):
 
     def clear(self):
         self._sentences.clear()
+        self._cancel_pending_segments()
         self._auto_hide_timer.stop()
         self._is_hidden_by_timeout = False
         for tw in self._text_widgets:
