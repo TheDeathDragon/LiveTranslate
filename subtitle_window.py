@@ -8,6 +8,7 @@ Usage:
   - OBS: Window Capture → select "LiveTrans Subtitle" → check "Allow Transparency"
 """
 
+import time
 from pathlib import Path
 
 import json
@@ -463,6 +464,9 @@ class SubtitleWindow(QWidget):
         self._is_hidden_by_timeout = False
         # Pending overflow segments for delayed insertion
         self._pending_segment_timers = []
+        # Minimum display time: queue rapid updates instead of replacing instantly
+        self._last_insert_time = 0.0
+        self._min_display_ms = 1500  # minimum ms before a sentence can be replaced
 
         self._setup_ui()
         self.update_text_signal.connect(self._on_update_text)
@@ -684,20 +688,34 @@ class SubtitleWindow(QWidget):
         # Split overflow text into multiple sentences
         segments = self._split_overflow(original, translations)
 
-        # Insert first segment immediately
-        self._insert_sentence(segments[0][0], segments[0][1])
+        # Respect minimum display time: delay if previous sentence was inserted recently
 
-        # Schedule remaining segments with 3s delay each
-        for i, (orig, trans) in enumerate(segments[1:], 1):
-            timer = QTimer(self)
-            timer.setSingleShot(True)
-            timer.setInterval(i * 3000)
-            timer.timeout.connect(lambda o=orig, t=trans: self._insert_sentence(o, t))
-            timer.start()
-            self._pending_segment_timers.append(timer)
+        now_ms = time.monotonic() * 1000
+        elapsed = now_ms - self._last_insert_time
+        base_delay = max(0, int(self._min_display_ms - elapsed)) if self._last_insert_time > 0 else 0
+
+        if base_delay == 0:
+            self._insert_sentence(segments[0][0], segments[0][1])
+            start_idx = 1
+        else:
+            start_idx = 0
+
+        # Schedule segments (including first if delayed) with appropriate intervals
+        for i, (orig, trans) in enumerate(segments[start_idx:]):
+            delay = base_delay + i * 3000
+            if delay == 0:
+                self._insert_sentence(orig, trans)
+            else:
+                timer = QTimer(self)
+                timer.setSingleShot(True)
+                timer.setInterval(delay)
+                timer.timeout.connect(lambda o=orig, t=trans: self._insert_sentence(o, t))
+                timer.start()
+                self._pending_segment_timers.append(timer)
 
     def _insert_sentence(self, original: str, translations: dict):
         """Insert a single sentence and refresh display."""
+
         max_sentences = self._settings.get("sentences", 1)
         self._sentences.append((original, translations))
         if len(self._sentences) > max_sentences:
@@ -708,6 +726,7 @@ class SubtitleWindow(QWidget):
 
         self._refresh_display()
         self._restart_auto_hide_timer()
+        self._last_insert_time = time.monotonic() * 1000
 
     def _cancel_pending_segments(self):
         """Cancel any pending delayed segment insertions."""
