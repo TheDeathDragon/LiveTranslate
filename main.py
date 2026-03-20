@@ -276,15 +276,14 @@ class LiveTransApp:
     def _on_target_language_changed(self, lang: str):
         self._target_language = lang
         log.info(f"Target language: {lang}")
+        if self._translator:
+            self._translator.set_target_language(lang)
         if self._panel:
             settings = self._panel.get_settings()
             settings["target_language"] = lang
             from control_panel import _save_settings
 
             _save_settings(settings)
-        active = self._panel.get_active_model() if self._panel else None
-        if active:
-            self._on_model_changed(active)
 
     def _on_model_changed(self, model_config: dict):
         log.info(

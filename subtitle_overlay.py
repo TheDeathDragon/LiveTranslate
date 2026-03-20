@@ -745,7 +745,9 @@ class DragHandle(QWidget):
     def set_target_language(self, lang: str):
         idx = self._target_lang.findData(lang)
         if idx >= 0:
+            self._target_lang.blockSignals(True)
             self._target_lang.setCurrentIndex(idx)
+            self._target_lang.blockSignals(False)
 
     def set_models(self, models: list, active_index: int = 0):
         self._model_combo.blockSignals(True)

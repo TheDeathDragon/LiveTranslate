@@ -123,6 +123,9 @@ class Translator:
         """(prompt_tokens, completion_tokens) from last translate call."""
         return self._last_prompt_tokens, self._last_completion_tokens
 
+    def set_target_language(self, target_language: str):
+        self._target_language = target_language
+
     def with_target_language(self, target_language: str) -> "Translator":
         """Create a new Translator with a different target language, sharing the same client."""
         t = Translator.__new__(Translator)
