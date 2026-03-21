@@ -169,6 +169,34 @@ class SetupWizardDialog(QDialog):
         self._log_signal.connect(self._append_log)
         self._log_handler = _LogCapture(self._log_signal.emit)
 
+        # Auto-start countdown
+        self._countdown = 5
+        self._auto_timer = QTimer()
+        self._auto_timer.setInterval(1000)
+        self._auto_timer.timeout.connect(self._tick_countdown)
+        self._auto_timer.start()
+        self._update_btn_countdown()
+
+        self._hub_combo.currentIndexChanged.connect(self._reset_countdown)
+
+    def _update_btn_countdown(self):
+        self._download_btn.setText(
+            f"{t('btn_start_download')} ({self._countdown}s)"
+        )
+
+    def _reset_countdown(self):
+        self._countdown = 5
+        self._auto_timer.start()
+        self._update_btn_countdown()
+
+    def _tick_countdown(self):
+        self._countdown -= 1
+        if self._countdown <= 0:
+            self._auto_timer.stop()
+            self._start_download()
+        else:
+            self._update_btn_countdown()
+
     def _append_log(self, text):
         self._log_view.append(text)
         self._log_view.verticalScrollBar().setValue(
@@ -176,6 +204,8 @@ class SetupWizardDialog(QDialog):
         )
 
     def _start_download(self):
+        self._auto_timer.stop()
+        self._download_btn.setText(t("btn_start_download"))
         self._download_btn.setEnabled(False)
         self._hub_combo.setEnabled(False)
         self._log_view.show()
