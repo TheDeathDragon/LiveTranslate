@@ -8,7 +8,7 @@ APP_DIR = Path(__file__).parent
 MODELS_DIR = APP_DIR / "models"
 
 ASR_MODEL_IDS = {
-    "sensevoice": "iic/SenseVoiceSmall",
+    "sensevoice": "FunAudioLLM/SenseVoiceSmall",
     "funasr-nano": "FunAudioLLM/Fun-ASR-Nano-2512",
     "funasr-mlt-nano": "FunAudioLLM/Fun-ASR-MLT-Nano-2512",
     "qwen3-asr": "Qwen3-ASR-1.7B",
@@ -47,7 +47,7 @@ _MODEL_SIZE_BYTES = {
 _WHISPER_SIZES = ["tiny", "base", "small", "medium", "large-v3"]
 
 _CACHE_MODELS = [
-    ("SenseVoice Small", "iic/SenseVoiceSmall"),
+    ("SenseVoice Small", "FunAudioLLM/SenseVoiceSmall"),
     ("Fun-ASR-Nano", "FunAudioLLM/Fun-ASR-Nano-2512"),
     ("Fun-ASR-MLT-Nano", "FunAudioLLM/Fun-ASR-MLT-Nano-2512"),
 ]

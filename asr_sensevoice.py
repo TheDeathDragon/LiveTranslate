@@ -17,7 +17,7 @@ LANG_MAP = {
 class SenseVoiceEngine:
     """Speech-to-text using FunASR SenseVoice."""
 
-    def __init__(self, model_name="iic/SenseVoiceSmall", device="cuda", hub="ms"):
+    def __init__(self, model_name="FunAudioLLM/SenseVoiceSmall", device="cuda", hub="ms"):
         from funasr import AutoModel
         from model_manager import get_local_model_path
 
