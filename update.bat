@@ -10,9 +10,30 @@ echo.
 :: Check git
 git --version >nul 2>&1
 if errorlevel 1 (
-    echo [ERROR] Git not found. Please install Git first.
-    pause
-    exit /b 1
+    echo Git not found, attempting to install via winget...
+    winget --version >nul 2>&1
+    if errorlevel 1 (
+        echo [ERROR] Git not found and winget is not available.
+        echo Please install Git from https://git-scm.com/downloads
+        pause
+        exit /b 1
+    )
+    winget install Git.Git --accept-package-agreements --accept-source-agreements
+    if errorlevel 1 (
+        echo [ERROR] Git installation failed.
+        pause
+        exit /b 1
+    )
+    :: Refresh PATH
+    set "PATH=%LOCALAPPDATA%\Microsoft\WinGet\Links;%ProgramFiles%\Git\cmd;%PATH%"
+    git --version >nul 2>&1
+    if errorlevel 1 (
+        echo [ERROR] Git installed but not found in PATH. Please restart and try again.
+        pause
+        exit /b 1
+    )
+    echo Git installed successfully.
+    echo.
 )
 
 :: Pull latest code
@@ -27,9 +48,10 @@ if errorlevel 1 (
 
 :: Check venv
 if not exist ".venv\Scripts\pip.exe" (
-    echo [ERROR] Virtual environment not found. Run install.bat first.
-    pause
-    exit /b 1
+    echo.
+    echo Virtual environment not found, running install.bat...
+    call install.bat
+    exit /b %errorlevel%
 )
 
 :: Update dependencies
