@@ -1068,10 +1068,10 @@ def main():
         info.exec()
 
         dlg = ModelEditDialog(None, {
-            "name": "lm-studio",
+            "name": "hunyuan-mt-chimera-7b",
             "api_base": "http://127.0.0.1:1234/v1",
-            "api_key": "lm-studio",
-            "model": "lm-studio",
+            "api_key": "sk-lm-tHzDfNGm:dgxlip7eebn3HIMxivqN",
+            "model": "hunyuan-mt-chimera-7b",
         })
         dlg.setWindowTitle(t("setup_api_title"))
         if dlg.exec() == QDialog.DialogCode.Accepted:
