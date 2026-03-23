@@ -6,7 +6,7 @@ import torch
 
 torch.set_num_threads(1)
 
-log = logging.getLogger("LiveTrans.VAD")
+log = logging.getLogger("LiveTranslate.VAD")
 
 
 class VADProcessor:

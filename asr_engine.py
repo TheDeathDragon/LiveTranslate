@@ -5,7 +5,7 @@ from faster_whisper import WhisperModel
 
 from translator import LANGUAGE_DISPLAY
 
-log = logging.getLogger("LiveTrans.ASR")
+log = logging.getLogger("LiveTranslate.ASR")
 
 
 LANGUAGE_NAMES = {**LANGUAGE_DISPLAY, "auto": "auto"}

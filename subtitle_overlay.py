@@ -249,9 +249,35 @@ class ChatMessage(QWidget):
             f'<span style="color:#8b8; font-size:9pt;">ASR {self._asr_ms:.0f}ms</span>'
         )
 
+    def update_streaming(self, partial_text: str):
+        """Update translation label with partial streaming text (throttled)."""
+        self._pending_streaming = partial_text
+        if not hasattr(self, "_streaming_timer"):
+            self._streaming_timer = QTimer()
+            self._streaming_timer.setSingleShot(True)
+            self._streaming_timer.setInterval(50)
+            self._streaming_timer.timeout.connect(self._flush_streaming)
+        if not self._streaming_timer.isActive():
+            self._flush_streaming()
+            self._streaming_timer.start()
+
+    def _flush_streaming(self):
+        text = getattr(self, "_pending_streaming", None)
+        if text is None:
+            return
+        self._pending_streaming = None
+        s = self._current_style
+        self._trans_label.setText(
+            f'<span style="color:{s["translation_color"]};">&gt; {_escape(text)}</span>'
+        )
+
     def set_translation(self, translated: str, translate_ms: float):
         self._translated = translated or ""
         self._translate_ms = translate_ms
+        # Stop streaming throttle if active
+        if hasattr(self, "_streaming_timer"):
+            self._streaming_timer.stop()
+            self._pending_streaming = None
         s = self._current_style
         if translated:
             if self._compact_mode:
@@ -589,7 +615,7 @@ class DragHandle(QWidget):
         drag_layout.setContentsMargins(0, 0, 4, 0)
         drag_layout.setSpacing(6)
 
-        title = QLabel("\u2630 LiveTrans")
+        title = QLabel("\u2630 LiveTranslate")
         title.setFont(QFont("Consolas", 9, QFont.Weight.Bold))
         title.setStyleSheet("color: #aaa; background: transparent;")
         drag_layout.addWidget(title)
@@ -839,6 +865,7 @@ class SubtitleOverlay(QWidget):
 
     add_message_signal = pyqtSignal(int, str, str, str, float)
     update_translation_signal = pyqtSignal(int, str, float)
+    update_streaming_signal = pyqtSignal(int, str)
     clear_signal = pyqtSignal()
     # Monitor signals (thread-safe)
     update_monitor_signal = pyqtSignal(float, float, object)
@@ -866,6 +893,7 @@ class SubtitleOverlay(QWidget):
 
         self.add_message_signal.connect(self._on_add_message)
         self.update_translation_signal.connect(self._on_update_translation)
+        self.update_streaming_signal.connect(self._on_update_streaming)
         self.clear_signal.connect(self._on_clear)
         self.update_monitor_signal.connect(self._on_update_monitor)
         self.update_stats_signal.connect(self._on_update_stats)
@@ -877,7 +905,7 @@ class SubtitleOverlay(QWidget):
             | Qt.WindowType.WindowStaysOnTopHint
             | Qt.WindowType.Tool
         )
-        self.setWindowTitle("LiveTrans")
+        self.setWindowTitle("LiveTranslate")
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
 
@@ -1071,6 +1099,11 @@ class SubtitleOverlay(QWidget):
             msg.set_translation(translated, translate_ms)
             QTimer.singleShot(50, self._scroll_to_bottom)
 
+    def _on_update_streaming(self, msg_id, partial_text):
+        msg = self._messages.get(msg_id)
+        if msg:
+            msg.update_streaming(partial_text)
+
     @pyqtSlot()
     def _on_clear(self):
         for msg in self._messages.values():
@@ -1111,6 +1144,9 @@ class SubtitleOverlay(QWidget):
 
     def update_translation(self, msg_id, translated, translate_ms):
         self.update_translation_signal.emit(msg_id, translated, translate_ms)
+
+    def update_streaming(self, msg_id, partial_text):
+        self.update_streaming_signal.emit(msg_id, partial_text)
 
     def update_monitor(self, rms, vad_conf, mic_rms=None):
         self.update_monitor_signal.emit(rms, vad_conf, mic_rms)

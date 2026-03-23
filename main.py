@@ -1,5 +1,5 @@
 """
-LiveTrans - Phase 0 Prototype
+LiveTranslate - Phase 0 Prototype
 Real-time audio translation using WASAPI loopback + faster-whisper + LLM.
 """
 
@@ -38,7 +38,7 @@ import torch  # noqa: F401
 from audio_capture import AudioCapture
 from vad_processor import VADProcessor
 from asr_engine import ASREngine
-from translator import Translator
+from translator import Translator, RepetitionError
 
 from PyQt6.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QDialog, QMessageBox
 from PyQt6.QtGui import QAction, QActionGroup, QIcon, QPixmap, QPainter, QColor, QFont
@@ -93,9 +93,9 @@ def setup_logging():
 
     # FunASR/ModelScope spam the root logger; suppress after our own init log
     logging.getLogger().setLevel(logging.WARNING)
-    logging.getLogger("LiveTrans").setLevel(logging.DEBUG)
+    logging.getLogger("LiveTranslate").setLevel(logging.DEBUG)
 
-    _logger = logging.getLogger("LiveTrans")
+    _logger = logging.getLogger("LiveTranslate")
 
     def _excepthook(exc_type, exc_value, exc_tb):
         _logger.critical("Uncaught exception", exc_info=(exc_type, exc_value, exc_tb))
@@ -114,7 +114,7 @@ def setup_logging():
     return _logger
 
 
-log = logging.getLogger("LiveTrans")
+log = logging.getLogger("LiveTranslate")
 
 
 def create_app_icon() -> QIcon:
@@ -138,7 +138,7 @@ def load_config():
         return yaml.safe_load(f)
 
 
-class LiveTransApp:
+class LiveTranslateApp:
     def __init__(self, config):
         self._config = config
         self._running = False
@@ -306,13 +306,15 @@ class LiveTransApp:
             target_language=self._target_language,
             max_tokens=self._config["translation"]["max_tokens"],
             temperature=self._config["translation"]["temperature"],
-            streaming=self._config["translation"]["streaming"],
+            streaming=model_config.get("streaming", True),
             system_prompt=prompt,
             proxy=model_config.get("proxy", "none"),
             no_system_role=model_config.get("no_system_role", False),
-            no_think=model_config.get("no_think", False),
+            no_think=model_config.get("no_think", True),
+            json_response=model_config.get("json_response", False),
             timeout=timeout,
         )
+        self._translator.set_context_turns(model_config.get("context_turns", 0))
         self._input_price = model_config.get("input_price", 0)
         self._output_price = model_config.get("output_price", 0)
 
@@ -467,10 +469,14 @@ class LiveTransApp:
         return 0.0
 
     def _translate_async(self, msg_id, text, source_lang, extra_langs=None):
-        """Translate text and update UI. If extra_langs is provided, also translate for subtitle window."""
+        """Translate text and update UI with streaming display."""
         try:
             tl_start = time.perf_counter()
-            translated = self._translator.translate(text, source_lang)
+            translated = None
+            for partial in self._translator.translate_iter(text, source_lang):
+                translated = partial
+                if self._overlay:
+                    self._overlay.update_streaming(msg_id, partial)
             tl_ms = (time.perf_counter() - tl_start) * 1000
             self._translate_count += 1
             pt, ct = self._translator.last_usage
@@ -492,6 +498,12 @@ class LiveTransApp:
                 if extra_langs:
                     self._translate_extra_langs(text, source_lang, extra_langs, tl_dict)
                 self._subwin.update_text(text, tl_dict)
+        except RepetitionError:
+            log.warning("Repetition loop detected, model may not support structured output well")
+            if self._overlay:
+                self._overlay.update_translation(
+                    msg_id, f"[{t('error_repetition')}]", 0
+                )
         except Exception as e:
             import openai
             if isinstance(e, (openai.APIConnectionError, openai.APITimeoutError,
@@ -696,12 +708,12 @@ class LiveTransApp:
     @staticmethod
     def _get_segmenter(lang: str):
         import pysbd
-        if lang not in LiveTransApp._pysbd_cache:
+        if lang not in LiveTranslateApp._pysbd_cache:
             pysbd_lang = lang if lang in pysbd.languages.LANGUAGE_CODES else "en"
-            LiveTransApp._pysbd_cache[lang] = pysbd.Segmenter(
+            LiveTranslateApp._pysbd_cache[lang] = pysbd.Segmenter(
                 language=pysbd_lang, clean=False
             )
-        return LiveTransApp._pysbd_cache[lang]
+        return LiveTranslateApp._pysbd_cache[lang]
 
     def _split_sentences(self, text: str, lang: str = "en") -> list[str]:
         """Split text into sentences using pysbd, with comma fallback for long text."""
@@ -1024,7 +1036,7 @@ class LiveTransApp:
 
 def main():
     setup_logging()
-    log.info("LiveTrans starting...")
+    log.info("LiveTranslate starting...")
     config = load_config()
     saved = _load_saved_settings()
 
@@ -1110,7 +1122,7 @@ def main():
     subwin = SubtitleWindow(subwin_cfg)
     subwin_was_enabled = (subwin_cfg or {}).get("enabled", False)
 
-    live_trans = LiveTransApp(config)
+    live_trans = LiveTranslateApp(config)
     live_trans.set_overlay(overlay)
     live_trans.set_subtitle_window(subwin)
     live_trans.set_panel(panel)
@@ -1186,7 +1198,7 @@ def main():
             if not _hide_notified[0]:
                 _hide_notified[0] = True
                 tray.showMessage(
-                    "LiveTrans",
+                    "LiveTranslate",
                     t("hide_tray_hint"),
                     QSystemTrayIcon.MessageIcon.Information,
                     3000,
@@ -1222,7 +1234,7 @@ def main():
             if not _subwin_notified[0]:
                 _subwin_notified[0] = True
                 tray.showMessage(
-                    "LiveTrans",
+                    "LiveTranslate",
                     t("subwin_drag_hint"),
                     QSystemTrayIcon.MessageIcon.Information,
                     3000,

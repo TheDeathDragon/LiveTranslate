@@ -5,7 +5,7 @@ Adapted from https://github.com/HaujetZhao/Qwen3-ASR-GGUF
 
 import logging
 
-logger = logging.getLogger("LiveTrans.Qwen3ASR")
+logger = logging.getLogger("LiveTranslate.Qwen3ASR")
 
 from .asr_engine import (
     QwenASREngine,

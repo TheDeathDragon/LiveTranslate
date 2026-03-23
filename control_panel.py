@@ -41,7 +41,7 @@ from model_manager import (
 from i18n import t, LANGUAGES
 from subtitle_settings import SubtitleSettingsWidget
 
-log = logging.getLogger("LiveTrans.Panel")
+log = logging.getLogger("LiveTranslate.Panel")
 
 SETTINGS_FILE = Path(__file__).parent / "user_settings.json"
 
@@ -169,6 +169,7 @@ class ControlPanel(QWidget):
         tabs.addTab(self._create_subtitle_tab(), t("tab_subtitle"))
         tabs.addTab(self._create_benchmark_tab(), t("tab_benchmark"))
         self._cache_tab_index = tabs.addTab(self._create_cache_tab(), t("tab_cache"))
+        tabs.addTab(self._create_changelog_tab(), t("tab_changelog"))
         tabs.currentChanged.connect(self._on_tab_changed)
 
         layout.addWidget(tabs)
@@ -180,6 +181,9 @@ class ControlPanel(QWidget):
         self._save_timer.setSingleShot(True)
         self._save_timer.setInterval(300)
         self._save_timer.timeout.connect(self._do_auto_save)
+
+        # Fit initial height based on whisper group visibility
+        QTimer.singleShot(0, lambda: self.resize(self.width(), self.sizeHint().height() + 20))
 
     # ── VAD / ASR Tab ──
 
@@ -197,8 +201,8 @@ class ControlPanel(QWidget):
         self._asr_engine.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self._asr_engine.addItems(
             [
-                "Whisper (faster-whisper)",
-                "SenseVoice (FunASR)",
+                f"[{t('asr_accurate')}] Whisper (faster-whisper)",
+                f"[{t('asr_fast')}] SenseVoice (FunASR)",
                 "Fun-ASR-Nano (FunASR)",
                 "Fun-ASR-MLT-Nano (FunASR, 31 langs)",
                 "Qwen3-ASR (GGUF, 30 langs)",
@@ -521,14 +525,12 @@ class ControlPanel(QWidget):
         self._prompt_edit.setFont(QFont("Consolas", 9))
         self._prompt_edit.setMaximumHeight(100)
         self._prompt_edit.setPlainText(current_prompt)
+        self._prompt_debounce = QTimer()
+        self._prompt_debounce.setSingleShot(True)
+        self._prompt_debounce.setInterval(600)
+        self._prompt_debounce.timeout.connect(self._apply_prompt)
+        self._prompt_edit.textChanged.connect(self._prompt_debounce.start)
         prompt_layout.addWidget(self._prompt_edit)
-
-        prompt_btn_row = QHBoxLayout()
-        prompt_btn_row.addStretch()
-        apply_prompt_btn = QPushButton(t("btn_apply_prompt"))
-        apply_prompt_btn.clicked.connect(self._apply_prompt)
-        prompt_btn_row.addWidget(apply_prompt_btn)
-        prompt_layout.addLayout(prompt_btn_row)
         layout.addWidget(prompt_group)
 
         net_group = QGroupBox(t("group_network"))
@@ -913,6 +915,19 @@ class ControlPanel(QWidget):
 
     # ── Cache Tab ──
 
+    def _create_changelog_tab(self):
+        from dialogs import _load_latest_changelog
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        _, html = _load_latest_changelog()
+        from PyQt6.QtWidgets import QTextBrowser
+        browser = QTextBrowser()
+        browser.setOpenExternalLinks(True)
+        browser.setHtml(html)
+        browser.setFont(QFont("Microsoft YaHei UI", 10))
+        layout.addWidget(browser)
+        return widget
+
     def _create_cache_tab(self):
         widget = QWidget()
         layout = QVBoxLayout(widget)
@@ -1007,7 +1022,11 @@ class ControlPanel(QWidget):
     def _on_engine_changed_whisper_vis(self, index):
         self._whisper_group.setVisible(index == 0)
         # Resize window to fit content after whisper group visibility change
-        QTimer.singleShot(0, lambda: self.resize(self.width(), self.sizeHint().height()))
+        def _fit():
+            self.adjustSize()
+            h = self.sizeHint().height() + 20
+            self.resize(self.width(), max(h, self.minimumHeight()))
+        QTimer.singleShot(0, _fit)
 
     def _update_whisper_size_label(self):
         from model_manager import is_asr_cached, _MODEL_SIZE_BYTES
@@ -1218,7 +1237,7 @@ class ControlPanel(QWidget):
 
         QMessageBox.information(
             self,
-            "LiveTrans",
+            "LiveTranslate",
             "Language changed. Please restart the application.\n"
             "语言已更改，请重启应用程序。",
         )

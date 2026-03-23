@@ -6,7 +6,7 @@ import wave
 import re
 import numpy as np
 
-log = logging.getLogger("LiveTrans.FunASR-Nano")
+log = logging.getLogger("LiveTranslate.FunASR-Nano")
 
 # Add bundled code to path so model.py can resolve its imports (ctc, tools.utils)
 _NANO_DIR = os.path.join(os.path.dirname(__file__), "funasr_nano")

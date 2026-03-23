@@ -1,7 +1,7 @@
 import logging
 import numpy as np
 
-log = logging.getLogger("LiveTrans.Qwen3ASR")
+log = logging.getLogger("LiveTranslate.Qwen3ASR")
 
 # Qwen3-ASR language code mapping (ISO 639-1 -> Qwen3 full name)
 _LANG_MAP = {

@@ -1,4 +1,4 @@
-# LiveTrans English UI strings
+# LiveTranslate English UI strings
 
 # Overlay
 translating: "translating..."
@@ -22,7 +22,7 @@ target_label: "Target:"
 source_label: "Source:"
 
 # Control Panel
-window_control_panel: "LiveTrans - Control Panel"
+window_control_panel: "LiveTranslate - Control Panel"
 tab_vad_asr: "VAD / ASR"
 tab_translation: "Translation"
 tab_benchmark: "Benchmark"
@@ -143,7 +143,7 @@ dialog_delete_msg: >-
   Continue?
 
 # Dialogs
-window_setup: "LiveTrans - Initial Setup"
+window_setup: "LiveTranslate - Initial Setup"
 group_download_source: "Model Download Source"
 hub_modelscope_full: "ModelScope (China)"
 hub_huggingface_full: "HuggingFace (International)"
@@ -153,7 +153,7 @@ download_failed: "Download failed: {error}"
 download_complete: "Download complete!"
 setup_api_hint: "Models downloaded! Now configure the translation API.\n\nYou need an API base URL, API key, and model name.\nDeepSeek is recommended (affordable and effective)."
 setup_api_title: "Configure Translation API"
-window_download: "LiveTrans - Download Models"
+window_download: "LiveTranslate - Download Models"
 downloading_models: "Downloading required models: {names}"
 btn_close: "Close"
 dialog_edit_model: "Edit Model"
@@ -171,6 +171,17 @@ no_system_role: "No system role (merge into user message)"
 no_system_role_hint: "Enable if the API rejects system messages (e.g. Qwen-MT). System prompt will be merged into user message."
 no_think: "Disable thinking (skip reasoning for thinking models)"
 no_think_hint: "Effective for Qwen3 and similar thinking models. Reduces token usage and latency via enable_thinking=false."
+streaming: "Streaming (incremental output)"
+streaming_hint: "When enabled, translation results are returned incrementally for lower latency. When disabled, waits for the full result."
+json_response: "Structured Output (JSON mode)"
+json_response_hint: "Requests the API to return results in JSON format, reducing extraneous text. Requires API support for json_object mode."
+label_context_turns: "Context:"
+context_turns_hint: "Include the last N translation pairs as context for better term consistency and reference resolution. 0 = no context."
+changelog_title: "What's New - {version}"
+asr_fast: "Fast"
+asr_accurate: "Accurate"
+error_repetition: "Repetition loop detected. Consider disabling Structured Output in model settings."
+tab_changelog: "Changelog"
 label_pricing: "Pricing:"
 label_input_price: "Input"
 label_output_price: "Output"
@@ -180,11 +191,11 @@ error_title: "Error"
 error_load_asr: "Failed to load ASR model:\n{error}"
 
 # Log Window
-window_log: "LiveTrans - Log"
+window_log: "LiveTranslate - Log"
 show_debug: "Show DEBUG"
 
 # System Tray
-tray_tooltip: "LiveTrans - Real-time Translation"
+tray_tooltip: "LiveTranslate - Real-time Translation"
 tray_start: "Start"
 tray_stop: "Stop"
 tray_pause: "Pause"

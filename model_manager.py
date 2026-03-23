@@ -2,7 +2,7 @@ import os
 import logging
 from pathlib import Path
 
-log = logging.getLogger("LiveTrans.ModelManager")
+log = logging.getLogger("LiveTranslate.ModelManager")
 
 APP_DIR = Path(__file__).parent
 MODELS_DIR = APP_DIR / "models"
@@ -263,7 +263,7 @@ def download_qwen3_asr():
         log.info("Fetching latest llama.cpp release tag...")
         try:
             req = urllib.request.Request(
-                LLAMA_CPP_LATEST_API, headers={"User-Agent": "LiveTrans"}
+                LLAMA_CPP_LATEST_API, headers={"User-Agent": "LiveTranslate"}
             )
             with urllib.request.urlopen(req, timeout=15) as resp:
                 tag = json.loads(resp.read())["tag_name"]

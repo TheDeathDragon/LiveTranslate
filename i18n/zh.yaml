@@ -1,4 +1,4 @@
-# LiveTrans 中文 UI 字符串
+# LiveTranslate 中文 UI 字符串
 
 # 悬浮窗
 translating: "翻译中..."
@@ -22,7 +22,7 @@ target_label: "目标:"
 source_label: "来源:"
 
 # 控制面板
-window_control_panel: "LiveTrans - 控制面板"
+window_control_panel: "LiveTranslate - 控制面板"
 tab_vad_asr: "VAD / ASR"
 tab_translation: "翻译"
 tab_benchmark: "基准测试"
@@ -142,7 +142,7 @@ dialog_delete_msg: >-
   是否继续？
 
 # 对话框
-window_setup: "LiveTrans - 初始设置"
+window_setup: "LiveTranslate - 初始设置"
 group_download_source: "模型下载源"
 hub_modelscope_full: "ModelScope (国内)"
 hub_huggingface_full: "HuggingFace (国际)"
@@ -152,7 +152,7 @@ download_failed: "下载失败: {error}"
 download_complete: "下载完成！"
 setup_api_hint: "模型下载完成！接下来请配置翻译 API。\n\n需要填写 API 地址、密钥和模型名称。\n推荐使用 DeepSeek（便宜好用）。"
 setup_api_title: "配置翻译 API"
-window_download: "LiveTrans - 下载模型"
+window_download: "LiveTranslate - 下载模型"
 downloading_models: "正在下载所需模型: {names}"
 btn_close: "关闭"
 dialog_edit_model: "编辑模型"
@@ -170,6 +170,17 @@ no_system_role: "无 system 角色 (合并到 user 消息)"
 no_system_role_hint: "如果 API 不支持 system 角色消息（如 Qwen-MT），请勾选。系统提示词将合并到 user 消息中。"
 no_think: "禁用思考 (关闭思考模型的推理过程)"
 no_think_hint: "对 Qwen3 等思考模型生效，减少 token 消耗和延迟。通过 enable_thinking=false 实现。"
+streaming: "流式传输 (逐字输出)"
+streaming_hint: "启用后翻译结果逐字返回，延迟更低。关闭则等待完整结果后一次性返回。"
+json_response: "结构化输出 (JSON 模式)"
+json_response_hint: "启用后要求 API 以 JSON 格式返回翻译结果，减少多余解释文字。需要 API 支持 json_object 模式。"
+label_context_turns: "上下文数:"
+context_turns_hint: "携带最近 N 条翻译历史作为上下文，提高术语一致性和指代理解。0 = 不携带上下文。"
+changelog_title: "更新日志 - {version}"
+asr_fast: "快速"
+asr_accurate: "准确"
+error_repetition: "检测到重复输出，建议在模型配置中取消勾选「结构化输出」"
+tab_changelog: "更新日志"
 label_pricing: "价格:"
 label_input_price: "输入"
 label_output_price: "输出"
@@ -179,11 +190,11 @@ error_title: "错误"
 error_load_asr: "ASR 模型加载失败:\n{error}"
 
 # 日志窗口
-window_log: "LiveTrans - 日志"
+window_log: "LiveTranslate - 日志"
 show_debug: "显示 DEBUG"
 
 # 系统托盘
-tray_tooltip: "LiveTrans - 实时翻译"
+tray_tooltip: "LiveTranslate - 实时翻译"
 tray_start: "启动"
 tray_stop: "停止"
 tray_pause: "暂停"

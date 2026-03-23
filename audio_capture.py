@@ -5,7 +5,7 @@ import time
 import numpy as np
 import pyaudiowpatch as pyaudio
 
-log = logging.getLogger("LiveTrans.Audio")
+log = logging.getLogger("LiveTranslate.Audio")
 
 DEVICE_CHECK_INTERVAL = 2.0  # seconds
 

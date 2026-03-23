@@ -5,7 +5,7 @@ Uses QPainterPath for outlined text rendering.
 Usage:
   - Middle-click drag to move the window
   - Configure via tray menu → Subtitle Mode → Settings
-  - OBS: Window Capture → select "LiveTrans Subtitle" → check "Allow Transparency"
+  - OBS: Window Capture → select "LiveTranslate Subtitle" → check "Allow Transparency"
 """
 
 import time
@@ -476,7 +476,7 @@ class SubtitleWindow(QWidget):
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
         )
-        self.setWindowTitle("LiveTrans Subtitle")
+        self.setWindowTitle("LiveTranslate Subtitle")
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
 

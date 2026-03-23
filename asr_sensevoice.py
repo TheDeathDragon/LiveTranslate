@@ -2,7 +2,7 @@ import logging
 import re
 import numpy as np
 
-log = logging.getLogger("LiveTrans.SenseVoice")
+log = logging.getLogger("LiveTranslate.SenseVoice")
 
 # Language tag mapping from SenseVoice output
 LANG_MAP = {

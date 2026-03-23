@@ -2,6 +2,7 @@ import logging
 import re
 import sys
 import threading
+from pathlib import Path
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QFont
@@ -12,6 +13,7 @@ from PyQt6.QtWidgets import (
     QDialogButtonBox,
     QDoubleSpinBox,
     QFormLayout,
+    QSpinBox,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -24,7 +26,7 @@ from PyQt6.QtWidgets import (
 from model_manager import download_asr, download_silero
 from i18n import t
 
-log = logging.getLogger("LiveTrans.Dialogs")
+log = logging.getLogger("LiveTranslate.Dialogs")
 
 SETTINGS_FILE = None  # set by control_panel on import
 _save_settings = None  # set by control_panel on import
@@ -81,7 +83,7 @@ class _ModelLoadDialog(QDialog):
 
     def __init__(self, message, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("LiveTrans")
+        self.setWindowTitle("LiveTranslate")
         self.setMinimumWidth(500)
         self.setMinimumHeight(300)
         self.setModal(True)
@@ -397,8 +399,19 @@ class ModelEditDialog(QDialog):
         self._proxy_url.setEnabled(False)
 
         self._no_system_role = QCheckBox(t("no_system_role"))
+        self._no_system_role.setToolTip(t("no_system_role_hint"))
         self._no_think = QCheckBox(t("no_think"))
         self._no_think.setToolTip(t("no_think_hint"))
+        self._no_think.setChecked(True)
+        self._streaming = QCheckBox(t("streaming"))
+        self._streaming.setToolTip(t("streaming_hint"))
+        self._streaming.setChecked(True)
+        self._json_response = QCheckBox(t("json_response"))
+        self._json_response.setToolTip(t("json_response_hint"))
+        self._context_turns = QSpinBox()
+        self._context_turns.setRange(0, 20)
+        self._context_turns.setValue(0)
+        self._context_turns.setToolTip(t("context_turns_hint"))
 
         # Pricing
         price_suffix = t("price_suffix")
@@ -426,12 +439,11 @@ class ModelEditDialog(QDialog):
         layout.addRow(t("label_proxy"), self._proxy_mode)
         layout.addRow(t("label_proxy_url"), self._proxy_url)
         layout.addRow(t("label_pricing"), price_row)
+        layout.addRow(t("label_context_turns"), self._context_turns)
+        layout.addRow("", self._streaming)
+        layout.addRow("", self._json_response)
         layout.addRow("", self._no_system_role)
         layout.addRow("", self._no_think)
-        hint = QLabel(t("no_system_role_hint"))
-        hint.setWordWrap(True)
-        hint.setStyleSheet("color: #888; font-size: 11px;")
-        layout.addRow("", hint)
 
         if model_data:
             self._name.setText(model_data.get("name", ""))
@@ -447,7 +459,10 @@ class ModelEditDialog(QDialog):
             else:
                 self._proxy_mode.setCurrentIndex(0)
             self._no_system_role.setChecked(model_data.get("no_system_role", False))
-            self._no_think.setChecked(model_data.get("no_think", False))
+            self._no_think.setChecked(model_data.get("no_think", True))
+            self._streaming.setChecked(model_data.get("streaming", True))
+            self._json_response.setChecked(model_data.get("json_response", False))
+            self._context_turns.setValue(model_data.get("context_turns", 0))
             self._input_price.setValue(model_data.get("input_price", 0))
             self._output_price.setValue(model_data.get("output_price", 0))
 
@@ -478,10 +493,63 @@ class ModelEditDialog(QDialog):
         }
         if self._no_system_role.isChecked():
             result["no_system_role"] = True
-        if self._no_think.isChecked():
-            result["no_think"] = True
+        if not self._no_think.isChecked():
+            result["no_think"] = False
+        if not self._streaming.isChecked():
+            result["streaming"] = False
+        if self._json_response.isChecked():
+            result["json_response"] = True
+        if self._context_turns.value() > 0:
+            result["context_turns"] = self._context_turns.value()
         if self._input_price.value() > 0:
             result["input_price"] = self._input_price.value()
         if self._output_price.value() > 0:
             result["output_price"] = self._output_price.value()
         return result
+
+
+_I18N_DIR = Path(__file__).parent / "i18n"
+
+
+def _changelog_to_html(text: str) -> str:
+    """Convert CHANGELOG.md subset to HTML (headings, bold, lists)."""
+    lines = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("### "):
+            lines.append(f"<h3>{stripped[4:]}</h3>")
+        elif stripped.startswith("## "):
+            lines.append(f"<h2>{stripped[3:]}</h2>")
+        elif stripped.startswith("# "):
+            continue  # skip file title
+        elif stripped.startswith("- "):
+            item = stripped[2:]
+            item = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", item)
+            item = re.sub(r"`(.+?)`", r"<code>\1</code>", item)
+            lines.append(f"<li>{item}</li>")
+        elif stripped:
+            lines.append(f"<p>{stripped}</p>")
+    return "\n".join(lines)
+
+
+def _load_latest_changelog() -> tuple[str, str]:
+    """Return (first_h3_title, html) for the latest changelog. Uses i18n lang."""
+    from i18n import get_lang
+    lang = get_lang()
+    path = _I18N_DIR / f"CHANGELOG_{lang}.md"
+    if not path.exists():
+        path = _I18N_DIR / "CHANGELOG_en.md"
+    if not path.exists():
+        return "", ""
+    text = path.read_text("utf-8")
+    # Use first ### title as the tracking key
+    m = re.search(r"^### (.+)$", text, re.MULTILINE)
+    if not m:
+        return "", ""
+    title = m.group(1).strip()
+    # Extract everything after the # title line (skip file heading)
+    first_h1 = text.find("\n#")
+    body = text[first_h1:] if first_h1 >= 0 else text
+    return title, _changelog_to_html(body)
+
+
