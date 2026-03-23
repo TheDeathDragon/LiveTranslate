@@ -32,9 +32,9 @@ Windows 实时音频翻译工具。捕获系统音频（WASAPI loopback）和可
 - **模型自动管理**：首次启动向导，支持 ModelScope / HuggingFace 双源
 - **内置基准测试**：对比翻译模型速度和质量
 
-## 开发计划
+## 更新日志
 
-- **主播模式**：为 OBS 提供透明窗口，实时翻译主播语音，支持多语言同时输出——可用作画面字幕或直播间留言板
+查看 [中文更新日志](i18n/CHANGELOG_zh.md) | [English Changelog](i18n/CHANGELOG_en.md)
 
 ## 系统要求
 

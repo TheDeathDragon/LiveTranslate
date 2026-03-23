@@ -32,9 +32,9 @@ Works with any system audio — videos, livestreams, voice chat. No player modif
 - **Auto model management**: Setup wizard, ModelScope / HuggingFace dual sources
 - **Built-in benchmark**: Compare translation model speed and quality
 
-## Roadmap
+## Changelog
 
-- **Streamer Mode**: Transparent OBS overlay window that translates the streamer's speech in real-time, with multi-language simultaneous output — usable as on-screen subtitles or a live chat translation panel
+See [English Changelog](i18n/CHANGELOG_en.md) | [中文更新日志](i18n/CHANGELOG_zh.md)
 
 ## Requirements
 
