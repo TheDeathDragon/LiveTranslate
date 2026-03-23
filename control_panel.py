@@ -46,45 +46,11 @@ log = logging.getLogger("LiveTranslate.Panel")
 SETTINGS_FILE = Path(__file__).parent / "user_settings.json"
 
 
-_VALID_KEYS = {
-    "hub",
-    "asr_engine",
-    "asr_language",
-    "asr_device",
-    "whisper_model_size",
-    "vad_mode",
-    "vad_threshold",
-    "energy_threshold",
-    "min_speech_duration",
-    "max_speech_duration",
-    "silence_mode",
-    "silence_duration",
-    "audio_device",
-    "mic_device",
-    "models",
-    "active_model",
-    "system_prompt",
-    "timeout",
-    "target_language",
-    "ui_lang",
-    "style",
-    "subtitle_mode",
-    "incremental_asr",
-    "interim_interval",
-}
-
-
 def _load_saved_settings() -> dict | None:
     try:
         if SETTINGS_FILE.exists():
             data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
             log.info(f"Loaded saved settings from {SETTINGS_FILE}")
-            stale = set(data.keys()) - _VALID_KEYS
-            if stale:
-                for k in stale:
-                    del data[k]
-                log.info(f"Removed stale settings keys: {stale}")
-                _save_settings(data)
             return data
     except Exception as e:
         log.warning(f"Failed to load settings: {e}")

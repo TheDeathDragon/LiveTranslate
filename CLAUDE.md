@@ -71,10 +71,13 @@ Each model in `user_settings.json` has: `name`, `api_base`, `api_key`, `model`, 
 
 Standalone transparent window for OBS capture, separate from the main overlay:
 - `SubtitleWindow`: Frameless, transparent, middle-click draggable, auto-hides after timeout
-- `_TextWidget`: QPainterPath-based outlined text rendering per line, with entry/exit animations
+- `_SubtitleTextWidget`: QPainterPath-based outlined text rendering per line, with automatic word-wrap and entry/exit animations
+- Text rendered to cached QPixmap; animations only blit the cached image (no per-frame path rendering)
 - Each line has independent font, color, outline, alignment, animation settings
-- Long text auto-segments at punctuation/comma boundaries to fit window width
-- `desired_height()` always returns font-line-height (never 0), preventing window collapse when empty
+- Long text auto-wraps at punctuation/word boundaries, expanding widget height for multiple lines
+- `desired_height()` returns height based on wrapped line count (never 0), preventing window collapse when empty
+- Window height animates smoothly (150ms OutCubic) when wrap count changes, keeping vertical center stable
+- Animation order: exit animation → height change → entry animation
 - Settings UI in `subtitle_settings.py`: grid layout, text lines as list with double-click edit dialog
 
 ### Overlay UI (subtitle_overlay.py)
@@ -99,6 +102,8 @@ Key overlay features:
 - **Auto-scroll**: Controls whether new messages/translations auto-scroll to bottom
 - **Model combo**: Populated from `user_settings.json` models list; switching emits `model_switch_requested` signal
 - **Target Language combo**: Emits `target_language_changed`; synced from settings on startup
+- **Compact mode animation**: Toggles between full and minimumHeight with 200ms size animation
+- **Position persistence**: `moveEvent`/`resizeEvent` with 500ms debounce save `overlay_x/y/w/h` to `user_settings.json`; restored on startup
 
 ### Settings UX
 

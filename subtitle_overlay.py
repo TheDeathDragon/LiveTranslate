@@ -3,7 +3,7 @@ import os
 
 import psutil
 from i18n import t, LANGUAGES
-from PyQt6.QtCore import QPoint, Qt, QTimer, pyqtSignal, pyqtSlot
+from PyQt6.QtCore import QPoint, QPropertyAnimation, QEasingCurve, QSize, Qt, QTimer, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QCursor, QFont
 from PyQt6.QtWidgets import (
     QApplication,
@@ -532,6 +532,8 @@ class MonitorBar(QWidget):
 class _DragArea(QWidget):
     """Small draggable area (title + grip)."""
 
+    drag_finished = pyqtSignal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setCursor(QCursor(Qt.CursorShape.SizeAllCursor))
@@ -549,7 +551,9 @@ class _DragArea(QWidget):
             self.window().move(event.globalPosition().toPoint() - self._drag_pos)
 
     def mouseReleaseEvent(self, event):
-        self._drag_pos = None
+        if self._drag_pos:
+            self._drag_pos = None
+            self.drag_finished.emit()
 
 
 _COMBO_CSS = """
@@ -593,6 +597,7 @@ class DragHandle(QWidget):
     hide_clicked = pyqtSignal()
     quit_clicked = pyqtSignal()
     mode_changed = pyqtSignal(str)  # "full" or "compact"
+    position_changed = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -610,6 +615,7 @@ class DragHandle(QWidget):
         row1.setSpacing(3)
 
         drag = _DragArea()
+        drag.drag_finished.connect(self.position_changed)
         drag.setStyleSheet("background: transparent;")
         drag_layout = QHBoxLayout(drag)
         drag_layout.setContentsMargins(0, 0, 4, 0)
@@ -882,6 +888,7 @@ class SubtitleOverlay(QWidget):
     quit_requested = pyqtSignal()
     subtitle_toggled = pyqtSignal()
     mode_changed = pyqtSignal(str)  # "full" or "compact"
+    position_changed = pyqtSignal()
 
     def __init__(self, config):
         super().__init__()
@@ -889,6 +896,13 @@ class SubtitleOverlay(QWidget):
         self._messages = {}
         self._max_messages = 50
         self._click_through = False
+        self._height_before_compact = None
+        self._mode_anim = None
+        self._pos_save_timer = QTimer(self)
+        self._pos_save_timer.setSingleShot(True)
+        self._pos_save_timer.setInterval(500)
+        self._pos_save_timer.timeout.connect(lambda: self.position_changed.emit())
+        self._last_saved_geo = None
         self._setup_ui()
 
         self.add_message_signal.connect(self._on_add_message)
@@ -947,6 +961,7 @@ class SubtitleOverlay(QWidget):
         self._handle.clear_clicked.connect(self._on_clear)
         self._handle.quit_clicked.connect(self.quit_requested.emit)
         self._handle.mode_changed.connect(self._on_mode_changed)
+        self._handle.position_changed.connect(self.position_changed)
         container_layout.addWidget(self._handle)
 
         # Monitor bar (collapsible)
@@ -995,6 +1010,22 @@ class SubtitleOverlay(QWidget):
         self._ct_timer = QTimer(self)
         self._ct_timer.timeout.connect(self._check_click_through)
         self._ct_timer.start(50)
+
+    def _schedule_pos_save(self):
+        if not self.isVisible():
+            return
+        geo = (self.x(), self.y(), self.width(), self.height())
+        if geo != self._last_saved_geo:
+            self._last_saved_geo = geo
+            self._pos_save_timer.start()
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        self._schedule_pos_save()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._schedule_pos_save()
 
     def set_running(self, running: bool):
         self._handle.set_running(running)
@@ -1057,6 +1088,25 @@ class SubtitleOverlay(QWidget):
         for msg in self._messages.values():
             msg.apply_style(s)
         self.mode_changed.emit(mode)
+
+        # Animate window height
+        if self._mode_anim and self._mode_anim.state() != QPropertyAnimation.State.Stopped:
+            self._mode_anim.stop()
+
+        if compact:
+            self._height_before_compact = self.height()
+            target_h = self.minimumHeight()
+        else:
+            target_h = self._height_before_compact or 500
+
+        anim = QPropertyAnimation(self, b"size")
+        anim.setDuration(200)
+        anim.setStartValue(self.size())
+        anim.setEndValue(QSize(self.width(), target_h))
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        self._mode_anim = anim
+        anim.start()
 
     def set_mode(self, mode: str):
         self._handle.set_mode(mode)

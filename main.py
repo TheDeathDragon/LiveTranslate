@@ -1115,6 +1115,15 @@ def main():
     panel = ControlPanel(config, saved_settings=saved)
 
     overlay = SubtitleOverlay(config["subtitle"])
+    if saved:
+        ox = saved.get("overlay_x")
+        oy = saved.get("overlay_y")
+        ow = saved.get("overlay_w")
+        oh = saved.get("overlay_h")
+        if ox is not None and oy is not None:
+            overlay.move(ox, oy)
+        if ow and oh:
+            overlay.resize(ow, oh)
     overlay.show()
 
     # Subtitle window
@@ -1212,6 +1221,22 @@ def main():
     menu.addAction(overlay_toggle_action)
 
     # --- Subtitle window toggle ---
+    def _save_overlay_pos():
+        settings = panel.get_settings()
+        pos = overlay.pos()
+        size = overlay.size()
+        settings["overlay_x"] = pos.x()
+        settings["overlay_y"] = pos.y()
+        settings["overlay_w"] = size.width()
+        settings["overlay_h"] = size.height()
+        panel._current_settings.update({
+            "overlay_x": pos.x(), "overlay_y": pos.y(),
+            "overlay_w": size.width(), "overlay_h": size.height(),
+        })
+        _save_settings(settings)
+
+    overlay.position_changed.connect(_save_overlay_pos)
+
     subwin_toggle_action = QAction(t("subwin_show"), checkable=True)
 
     def _save_subwin_state():
