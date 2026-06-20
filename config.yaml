@@ -9,12 +9,41 @@ audio:
   chunk_duration: 0.032
 
 asr:
-  # ASR engine: whisper, funasr, anime-whisper
+  # ASR engine: whisper, funasr, anime-whisper, remote-whisper, crispasr, sherpa-onnx, parakeet-cpp
   asr_engine: "funasr"
   # Model size: tiny, base, small, medium, large-v3
   model_size: "medium"
   # FunASR model: sensevoice-small, funasr-nano-2512, funasr-mlt-nano-2512
   funasr_model: "sensevoice-small"
+  # CrispASR GGUF model key or local .gguf/.bin path. Empty means user has not selected a model yet.
+  crispasr_model: ""
+  crispasr_backend: "auto"
+  crispasr_gpu_backend: "auto"
+  crispasr_device_index: 0
+  crispasr_punc_model: "auto"
+  crispasr_unified_memory: true
+  # sherpa-onnx local model directory. Empty means user has not selected a model yet.
+  sherpa_onnx_model: ""
+  # parakeet.cpp local GGUF model path. Empty means user has not selected a model yet.
+  parakeet_cpp_model: ""
+  # Runtime directory containing parakeet shared library and dependency DLLs.
+  parakeet_cpp_runtime_dir: ""
+  # parakeet.cpp backend: auto, cpu, cuda, vulkan.
+  parakeet_cpp_backend: "auto"
+  # parakeet.cpp decoder: auto, ctc, tdt.
+  parakeet_cpp_decoder: "auto"
+  # Use C API JSON path when word timestamps are requested.
+  parakeet_cpp_word_timestamps: true
+  # Remote Whisper server URL used when asr_engine is remote-whisper.
+  remote_asr_url: "http://127.0.0.1:8765"
+  # sherpa-onnx provider: auto, cpu, cuda. Auto uses CUDA only with a CUDA sherpa-onnx wheel and CUDA ASR device.
+  sherpa_onnx_provider: "auto"
+  sherpa_onnx_num_threads: 2
+  sherpa_onnx_decoding_method: "greedy_search"
+  # Left silence for sherpa-onnx OnlineRecognizer segment wrapper.
+  sherpa_onnx_left_padding_seconds: 0.3
+  # Tail silence for sherpa-onnx OnlineRecognizer segment wrapper.
+  sherpa_onnx_tail_padding_seconds: 0.5
   # Device: cuda or cpu
   device: "cuda"
   # Compute type: float16, int8_float16, int8
@@ -27,6 +56,13 @@ asr:
   max_speech_duration: 8.0
   # VAD threshold (0.0 - 1.0)
   vad_threshold: 0.5
+  # VAD mode: silero, firered, energy, disabled
+  vad_mode: "silero"
+  # FireRedVAD Stream-VAD model directory. Empty means not selected.
+  firered_vad_model: ""
+  firered_vad_use_gpu: false
+  firered_vad_smooth_window_size: 5
+  firered_vad_frame_aggregation: "max"
   # SenseVoice input padding bucket in seconds (0 = disabled)
   sensevoice_pad_seconds: 0.5
   # faster-whisper input padding bucket in seconds (0 = disabled)
@@ -35,7 +71,7 @@ asr:
 translation:
   # OpenAI-compatible API settings
   api_base: "http://127.0.0.1:1234/v1"
-  api_key: "sk-lm-tHzDfNGm:dgxlip7eebn3HIMxivqN"
+  api_key: "dummy"
   model: "hunyuan-mt-chimera-7b"
   # Target language for translation
   target_language: "zh"

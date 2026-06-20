@@ -1,4 +1,3 @@
-import json
 import logging
 import os
 import threading
@@ -8,6 +7,7 @@ from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QColorDialog,
     QComboBox,
     QDoubleSpinBox,
@@ -42,41 +42,38 @@ from model_manager import (
     funasr_supports_padding,
     format_size,
     get_cache_entries,
+    list_local_parakeet_cpp_models,
+    list_local_parakeet_cpp_runtimes,
+    list_local_crispasr_models,
     list_local_faster_whisper_models,
+    list_local_firered_vad_models,
+    list_local_sherpa_onnx_models,
     migrate_funasr_settings,
     normalize_funasr_model_key,
+    resolve_custom_parakeet_cpp_model,
+    resolve_parakeet_cpp_runtime_dir,
+    resolve_custom_crispasr_model,
+    resolve_custom_firered_vad_model,
+    resolve_custom_sherpa_onnx_model,
     resolve_custom_whisper_model,
 )
 from i18n import t, LANGUAGES
 from subtitle_settings import SubtitleSettingsWidget
+from settings_store import (
+    SETTINGS_FILE,
+    load_settings,
+    normalize_settings,
+    save_settings,
+)
 
 log = logging.getLogger("LiveTranslate.Panel")
 
-SETTINGS_FILE = Path(__file__).parent / "user_settings.json"
-
-
 def _load_saved_settings() -> dict | None:
-    try:
-        if SETTINGS_FILE.exists():
-            data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
-            migrate_funasr_settings(data)
-            log.info(f"Loaded saved settings from {SETTINGS_FILE}")
-            return data
-    except Exception as e:
-        log.warning(f"Failed to load settings: {e}")
-    return None
+    return load_settings()
 
 
 def _save_settings(settings: dict):
-    try:
-        tmp = SETTINGS_FILE.with_suffix(".tmp")
-        tmp.write_text(
-            json.dumps(settings, indent=2, ensure_ascii=False), encoding="utf-8"
-        )
-        tmp.replace(SETTINGS_FILE)
-        log.info(f"Settings saved to {SETTINGS_FILE}")
-    except Exception as e:
-        log.warning(f"Failed to save settings: {e}")
+    save_settings(settings)
 
 
 class ControlPanel(QWidget):
@@ -86,6 +83,7 @@ class ControlPanel(QWidget):
     model_changed = pyqtSignal(dict)
     models_list_changed = pyqtSignal(list, int)
     subtitle_settings_changed = pyqtSignal(dict)
+    asr_language_changed = pyqtSignal(str)
     _bench_result = pyqtSignal(str)
     _cache_result = pyqtSignal(list)
     reset_positions = pyqtSignal()
@@ -98,74 +96,13 @@ class ControlPanel(QWidget):
         self.resize(520, 650)
 
         saved = migrate_funasr_settings(saved_settings) or _load_saved_settings()
-        if saved:
-            self._current_settings = saved
-        else:
-            tc = config["translation"]
-            self._current_settings = {
-                "vad_mode": "silero",
-                "vad_threshold": config["asr"]["vad_threshold"],
-                "energy_threshold": 0.02,
-                "min_speech_duration": config["asr"]["min_speech_duration"],
-                "max_speech_duration": config["asr"]["max_speech_duration"],
-                "silence_mode": "auto",
-                "silence_duration": 0.8,
-                "asr_language": config["asr"].get("language", "auto"),
-                "asr_engine": "funasr",
-                "funasr_model": config["asr"].get(
-                    "funasr_model", DEFAULT_FUNASR_MODEL
-                ),
-                "asr_device": "cuda",
-                "sensevoice_pad_seconds": config["asr"].get(
-                    "sensevoice_pad_seconds", 0.5
-                ),
-                "whisper_pad_seconds": config["asr"].get(
-                    "whisper_pad_seconds", 0.5
-                ),
-                "models": [
-                    {
-                        "name": f"{tc['model']}",
-                        "api_base": tc["api_base"],
-                        "api_key": tc["api_key"],
-                        "model": tc["model"],
-                    }
-                ],
-                "active_model": 0,
-                "hub": "ms",
-            }
-
-        if "models" not in self._current_settings:
-            tc = config["translation"]
-            self._current_settings["models"] = [
-                {
-                    "name": f"{tc['model']}",
-                    "api_base": tc["api_base"],
-                    "api_key": tc["api_key"],
-                    "model": tc["model"],
-                }
-            ]
-            self._current_settings["active_model"] = 0
-
-        self._current_settings.setdefault(
-            "funasr_model",
-            config["asr"].get("funasr_model", DEFAULT_FUNASR_MODEL),
-        )
-        self._current_settings["funasr_model"] = normalize_funasr_model_key(
-            self._current_settings.get("funasr_model")
-        )
-        self._current_settings.setdefault(
-            "sensevoice_pad_seconds",
-            config["asr"].get("sensevoice_pad_seconds", 0.5),
-        )
-        self._current_settings.setdefault(
-            "whisper_pad_seconds",
-            config["asr"].get("whisper_pad_seconds", 0.5),
-        )
+        self._current_settings = normalize_settings(config, saved)
 
         layout = QVBoxLayout(self)
         tabs = QTabWidget()
 
-        tabs.addTab(self._create_vad_tab(), t("tab_vad_asr"))
+        tabs.addTab(self._create_asr_tab(), t("tab_asr"))
+        tabs.addTab(self._create_vad_tab(), t("tab_vad"))
         tabs.addTab(self._create_translation_tab(), t("tab_translation"))
         tabs.addTab(self._create_style_tab(), t("tab_style"))
         tabs.addTab(self._create_subtitle_tab(), t("tab_subtitle"))
@@ -187,9 +124,9 @@ class ControlPanel(QWidget):
         # Fit initial height based on whisper group visibility
         QTimer.singleShot(0, lambda: self.resize(self.width(), self.sizeHint().height() + 20))
 
-    # ── VAD / ASR Tab ──
+    # ── ASR Tab ──
 
-    def _create_vad_tab(self):
+    def _create_asr_tab(self):
         widget = QWidget()
         layout = QVBoxLayout(widget)
         s = self._current_settings
@@ -201,21 +138,19 @@ class ControlPanel(QWidget):
 
         self._asr_engine = QComboBox()
         self._asr_engine.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-        self._asr_engine.addItems(
-            [
-                f"[{t('asr_accurate')}] Whisper (faster-whisper)",
-                f"[{t('asr_fast')}] FunASR",
-                "Anime-Whisper (ja, anime/galgame)",
-                "Remote Whisper (remote GPU server)",
-            ]
-        )
-        engine_map_idx = {
-            "whisper": 0,
-            "funasr": 1,
-            "anime-whisper": 2,
-            "remote-whisper": 3,
-        }
-        engine_idx = engine_map_idx.get(s.get("asr_engine"), 0)
+        for label, key in (
+            (f"[{t('asr_accurate')}] Whisper (faster-whisper)", "whisper"),
+            (f"[{t('asr_fast')}] FunASR", "funasr"),
+            ("Anime-Whisper (ja, anime/galgame)", "anime-whisper"),
+            ("Remote Whisper (remote GPU server)", "remote-whisper"),
+            ("CrispASR (ggml)", "crispasr"),
+            ("sherpa-onnx (ONNX)", "sherpa-onnx"),
+            ("parakeet.cpp (GGUF)", "parakeet-cpp"),
+        ):
+            self._asr_engine.addItem(label, key)
+        engine_idx = self._asr_engine.findData(s.get("asr_engine"))
+        if engine_idx < 0:
+            engine_idx = self._asr_engine.findData("funasr")
         self._asr_engine.setCurrentIndex(engine_idx)
         asr_layout.addWidget(QLabel(t("label_engine")), 0, 0)
         asr_layout.addWidget(self._asr_engine, 0, 1)
@@ -232,6 +167,9 @@ class ControlPanel(QWidget):
         asr_layout.addWidget(QLabel(t("label_language_hint")), 1, 0)
         asr_layout.addWidget(self._asr_lang, 1, 1)
         self._asr_lang.currentIndexChanged.connect(self._auto_save)
+        self._asr_lang.currentIndexChanged.connect(
+            lambda _idx: self.asr_language_changed.emit(self._get_asr_lang_code())
+        )
 
         self._asr_device = QComboBox()
         devices = ["cuda", "cpu"]
@@ -271,6 +209,136 @@ class ControlPanel(QWidget):
         asr_layout.addWidget(self._funasr_model_label, 3, 0)
         asr_layout.addWidget(self._funasr_model_combo, 3, 1)
 
+        self._crispasr_gpu_label = QLabel(t("label_crispasr_gpu_backend"))
+        self._crispasr_gpu_backend = QComboBox()
+        self._crispasr_gpu_backend.addItems(["Auto", "CUDA", "Vulkan", "CPU"])
+        gpu_backend = str(s.get("crispasr_gpu_backend", "auto")).lower()
+        gpu_idx = {"auto": 0, "cuda": 1, "vulkan": 2, "cpu": 3}.get(gpu_backend, 0)
+        self._crispasr_gpu_backend.setCurrentIndex(gpu_idx)
+        self._crispasr_gpu_backend.currentIndexChanged.connect(
+            self._on_crispasr_runtime_setting_changed
+        )
+        asr_layout.addWidget(self._crispasr_gpu_label, 4, 0)
+        asr_layout.addWidget(self._crispasr_gpu_backend, 4, 1)
+
+        self._crispasr_device_label = QLabel(t("label_crispasr_device_index"))
+        self._crispasr_device_index = QSpinBox()
+        self._crispasr_device_index.setRange(0, 16)
+        self._crispasr_device_index.setValue(int(s.get("crispasr_device_index", 0) or 0))
+        self._crispasr_device_index.valueChanged.connect(
+            self._on_crispasr_runtime_setting_changed
+        )
+        asr_layout.addWidget(self._crispasr_device_label, 5, 0)
+        asr_layout.addWidget(self._crispasr_device_index, 5, 1)
+
+        self._crispasr_punc_label = QLabel(t("label_crispasr_punc_model"))
+        self._crispasr_punc_model = QComboBox()
+        for label, value in (
+            ("Auto", "auto"),
+            ("Off", "off"),
+            ("FireRedPunc", "firered"),
+            ("fullstop", "fullstop"),
+            ("punctuate-all", "punctuate-all"),
+            ("PCS", "pcs"),
+        ):
+            self._crispasr_punc_model.addItem(label, value)
+        punc = str(s.get("crispasr_punc_model", "auto")).lower()
+        punc_idx = self._crispasr_punc_model.findData(punc)
+        if punc_idx >= 0:
+            self._crispasr_punc_model.setCurrentIndex(punc_idx)
+        self._crispasr_punc_model.currentIndexChanged.connect(
+            self._on_crispasr_runtime_setting_changed
+        )
+        asr_layout.addWidget(self._crispasr_punc_label, 6, 0)
+        asr_layout.addWidget(self._crispasr_punc_model, 6, 1)
+
+        self._crispasr_unified_memory = QCheckBox(t("label_crispasr_unified_memory"))
+        self._crispasr_unified_memory.setChecked(
+            bool(s.get("crispasr_unified_memory", True))
+        )
+        self._crispasr_unified_memory.toggled.connect(
+            self._on_crispasr_runtime_setting_changed
+        )
+        asr_layout.addWidget(self._crispasr_unified_memory, 7, 1)
+
+        self._sherpa_onnx_provider_label = QLabel(t("label_sherpa_onnx_provider"))
+        self._sherpa_onnx_provider = QComboBox()
+        for label, value in (("Auto", "auto"), ("CPU", "cpu"), ("CUDA", "cuda")):
+            self._sherpa_onnx_provider.addItem(label, value)
+        provider = str(s.get("sherpa_onnx_provider", "auto")).lower()
+        provider_idx = self._sherpa_onnx_provider.findData(provider)
+        if provider_idx >= 0:
+            self._sherpa_onnx_provider.setCurrentIndex(provider_idx)
+        self._sherpa_onnx_provider.currentIndexChanged.connect(
+            self._on_sherpa_onnx_setting_changed
+        )
+        asr_layout.addWidget(self._sherpa_onnx_provider_label, 8, 0)
+        asr_layout.addWidget(self._sherpa_onnx_provider, 8, 1)
+
+        self._sherpa_onnx_threads_label = QLabel(t("label_sherpa_onnx_threads"))
+        self._sherpa_onnx_num_threads = QSpinBox()
+        self._sherpa_onnx_num_threads.setRange(1, 32)
+        self._sherpa_onnx_num_threads.setValue(
+            int(s.get("sherpa_onnx_num_threads", 2) or 2)
+        )
+        self._sherpa_onnx_num_threads.valueChanged.connect(
+            self._on_sherpa_onnx_setting_changed
+        )
+        asr_layout.addWidget(self._sherpa_onnx_threads_label, 9, 0)
+        asr_layout.addWidget(self._sherpa_onnx_num_threads, 9, 1)
+
+        self._sherpa_onnx_decoding_label = QLabel(t("label_sherpa_onnx_decoding"))
+        self._sherpa_onnx_decoding_method = QComboBox()
+        self._sherpa_onnx_decoding_method.addItem("greedy_search", "greedy_search")
+        decoding = str(s.get("sherpa_onnx_decoding_method", "greedy_search"))
+        decoding_idx = self._sherpa_onnx_decoding_method.findData(decoding)
+        if decoding_idx >= 0:
+            self._sherpa_onnx_decoding_method.setCurrentIndex(decoding_idx)
+        self._sherpa_onnx_decoding_method.currentIndexChanged.connect(
+            self._on_sherpa_onnx_setting_changed
+        )
+        asr_layout.addWidget(self._sherpa_onnx_decoding_label, 10, 0)
+        asr_layout.addWidget(self._sherpa_onnx_decoding_method, 10, 1)
+
+        self._parakeet_cpp_backend_label = QLabel(t("label_parakeet_cpp_backend"))
+        self._parakeet_cpp_backend = QComboBox()
+        for label, value in (("Auto", "auto"), ("CPU", "cpu"), ("CUDA", "cuda"), ("Vulkan", "vulkan")):
+            self._parakeet_cpp_backend.addItem(label, value)
+        parakeet_backend = str(s.get("parakeet_cpp_backend", "auto")).lower()
+        parakeet_backend_idx = self._parakeet_cpp_backend.findData(parakeet_backend)
+        if parakeet_backend_idx >= 0:
+            self._parakeet_cpp_backend.setCurrentIndex(parakeet_backend_idx)
+        self._parakeet_cpp_backend.currentIndexChanged.connect(
+            self._on_parakeet_cpp_setting_changed
+        )
+        asr_layout.addWidget(self._parakeet_cpp_backend_label, 11, 0)
+        asr_layout.addWidget(self._parakeet_cpp_backend, 11, 1)
+
+        self._parakeet_cpp_decoder_label = QLabel(t("label_parakeet_cpp_decoder"))
+        self._parakeet_cpp_decoder = QComboBox()
+        for label, value in (("Auto", "auto"), ("CTC", "ctc"), ("TDT/RNNT", "tdt")):
+            self._parakeet_cpp_decoder.addItem(label, value)
+        parakeet_decoder = str(s.get("parakeet_cpp_decoder", "auto")).lower()
+        parakeet_decoder_idx = self._parakeet_cpp_decoder.findData(parakeet_decoder)
+        if parakeet_decoder_idx >= 0:
+            self._parakeet_cpp_decoder.setCurrentIndex(parakeet_decoder_idx)
+        self._parakeet_cpp_decoder.currentIndexChanged.connect(
+            self._on_parakeet_cpp_setting_changed
+        )
+        asr_layout.addWidget(self._parakeet_cpp_decoder_label, 12, 0)
+        asr_layout.addWidget(self._parakeet_cpp_decoder, 12, 1)
+
+        self._parakeet_cpp_word_timestamps = QCheckBox(
+            t("label_parakeet_cpp_word_timestamps")
+        )
+        self._parakeet_cpp_word_timestamps.setChecked(
+            bool(s.get("parakeet_cpp_word_timestamps", True))
+        )
+        self._parakeet_cpp_word_timestamps.toggled.connect(
+            self._on_parakeet_cpp_setting_changed
+        )
+        asr_layout.addWidget(self._parakeet_cpp_word_timestamps, 13, 1)
+
         self._whisper_pad_label = QLabel(t("label_whisper_padding"))
         self._whisper_pad_seconds = QDoubleSpinBox()
         self._whisper_pad_seconds.setRange(0.0, 5.0)
@@ -284,8 +352,8 @@ class ControlPanel(QWidget):
         self._whisper_pad_seconds.setSuffix(" s")
         self._whisper_pad_seconds.setSpecialValueText(t("whisper_padding_off"))
         self._whisper_pad_seconds.setToolTip(t("whisper_padding_tooltip"))
-        asr_layout.addWidget(self._whisper_pad_label, 4, 0)
-        asr_layout.addWidget(self._whisper_pad_seconds, 4, 1)
+        asr_layout.addWidget(self._whisper_pad_label, 14, 0)
+        asr_layout.addWidget(self._whisper_pad_seconds, 14, 1)
         self._whisper_pad_seconds.valueChanged.connect(self._auto_save)
 
         self._sensevoice_pad_label = QLabel(t("label_sensevoice_padding"))
@@ -301,8 +369,8 @@ class ControlPanel(QWidget):
         self._sensevoice_pad_seconds.setSuffix(" s")
         self._sensevoice_pad_seconds.setSpecialValueText(t("sensevoice_padding_off"))
         self._sensevoice_pad_seconds.setToolTip(t("sensevoice_padding_tooltip"))
-        asr_layout.addWidget(self._sensevoice_pad_label, 5, 0)
-        asr_layout.addWidget(self._sensevoice_pad_seconds, 5, 1)
+        asr_layout.addWidget(self._sensevoice_pad_label, 15, 0)
+        asr_layout.addWidget(self._sensevoice_pad_seconds, 15, 1)
         self._sensevoice_pad_seconds.valueChanged.connect(self._auto_save)
 
         self._audio_device = QComboBox()
@@ -324,8 +392,8 @@ class ControlPanel(QWidget):
                 self._audio_device.setCurrentIndex(idx)
         else:
             self._audio_device.setCurrentIndex(1)  # system default
-        asr_layout.addWidget(QLabel(t("label_audio")), 6, 0)
-        asr_layout.addWidget(self._audio_device, 6, 1)
+        asr_layout.addWidget(QLabel(t("label_audio")), 16, 0)
+        asr_layout.addWidget(self._audio_device, 16, 1)
         self._audio_device.currentIndexChanged.connect(self._auto_save)
 
         self._mic_device = QComboBox()
@@ -346,16 +414,16 @@ class ControlPanel(QWidget):
                 idx = self._mic_device.findText(saved_mic)
                 if idx >= 0:
                     self._mic_device.setCurrentIndex(idx)
-        asr_layout.addWidget(QLabel(t("label_mic")), 7, 0)
-        asr_layout.addWidget(self._mic_device, 7, 1)
+        asr_layout.addWidget(QLabel(t("label_mic")), 17, 0)
+        asr_layout.addWidget(self._mic_device, 17, 1)
         self._mic_device.currentIndexChanged.connect(self._auto_save)
 
         self._hub_combo = QComboBox()
         self._hub_combo.addItems([t("hub_modelscope"), t("hub_huggingface")])
         saved_hub = s.get("hub", "ms")
         self._hub_combo.setCurrentIndex(0 if saved_hub == "ms" else 1)
-        asr_layout.addWidget(QLabel(t("label_hub")), 8, 0)
-        asr_layout.addWidget(self._hub_combo, 8, 1)
+        asr_layout.addWidget(QLabel(t("label_hub")), 18, 0)
+        asr_layout.addWidget(self._hub_combo, 18, 1)
         self._hub_combo.currentIndexChanged.connect(self._auto_save)
 
         self._ui_lang_combo = QComboBox()
@@ -364,8 +432,8 @@ class ControlPanel(QWidget):
 
         saved_lang = s.get("ui_lang", get_lang())
         self._ui_lang_combo.setCurrentIndex(0 if saved_lang == "en" else 1)
-        asr_layout.addWidget(QLabel(t("label_ui_lang")), 9, 0)
-        asr_layout.addWidget(self._ui_lang_combo, 9, 1)
+        asr_layout.addWidget(QLabel(t("label_ui_lang")), 19, 0)
+        asr_layout.addWidget(self._ui_lang_combo, 19, 1)
         self._ui_lang_combo.currentIndexChanged.connect(self._on_ui_lang_changed)
 
         layout.addWidget(asr_group)
@@ -389,12 +457,94 @@ class ControlPanel(QWidget):
         self._whisper_dl_btn.clicked.connect(self._download_whisper)
         whisper_layout.addWidget(self._whisper_dl_btn)
         layout.addWidget(self._whisper_group)
-        self._whisper_group.setVisible(engine_idx == 0)
-        self._asr_engine.currentIndexChanged.connect(
-            self._on_engine_changed_whisper_vis
+        self._whisper_group.setVisible(self._selected_asr_engine() == "whisper")
+
+        self._crispasr_group = QGroupBox(t("group_crispasr_model"))
+        crispasr_layout = QHBoxLayout(self._crispasr_group)
+        self._crispasr_model_combo = QComboBox()
+        saved_crispasr_model = s.get("crispasr_model", "")
+        self._populate_crispasr_models(saved_crispasr_model)
+        self._crispasr_model_combo.currentIndexChanged.connect(
+            self._on_crispasr_model_changed
         )
-        self._on_engine_changed_whisper_vis(engine_idx)
-        self._update_whisper_size_label()
+        crispasr_layout.addWidget(self._crispasr_model_combo)
+        self._crispasr_status = QLabel("")
+        self._crispasr_status.setStyleSheet("color: #888; font-size: 11px;")
+        crispasr_layout.addWidget(self._crispasr_status, 1)
+        layout.addWidget(self._crispasr_group)
+        self._crispasr_group.setVisible(self._selected_asr_engine() == "crispasr")
+
+        self._sherpa_onnx_group = QGroupBox(t("group_sherpa_onnx_models"))
+        sherpa_layout = QHBoxLayout(self._sherpa_onnx_group)
+        self._sherpa_onnx_model_combo = QComboBox()
+        saved_sherpa_model = s.get("sherpa_onnx_model", "")
+        self._populate_sherpa_onnx_models(saved_sherpa_model)
+        self._sherpa_onnx_model_combo.currentIndexChanged.connect(
+            self._on_sherpa_onnx_model_changed
+        )
+        sherpa_layout.addWidget(self._sherpa_onnx_model_combo)
+        self._sherpa_onnx_status = QLabel("")
+        self._sherpa_onnx_status.setStyleSheet("color: #888; font-size: 11px;")
+        sherpa_layout.addWidget(self._sherpa_onnx_status, 1)
+        self._sherpa_onnx_refresh_btn = QPushButton(t("btn_refresh_sherpa_onnx_models"))
+        self._sherpa_onnx_refresh_btn.clicked.connect(
+            self._refresh_sherpa_onnx_models
+        )
+        sherpa_layout.addWidget(self._sherpa_onnx_refresh_btn)
+        layout.addWidget(self._sherpa_onnx_group)
+        self._sherpa_onnx_group.setVisible(
+            self._selected_asr_engine() == "sherpa-onnx"
+        )
+
+        self._parakeet_cpp_model_group = QGroupBox(t("group_parakeet_cpp_model"))
+        parakeet_model_layout = QHBoxLayout(self._parakeet_cpp_model_group)
+        self._parakeet_cpp_model_combo = QComboBox()
+        saved_parakeet_model = s.get("parakeet_cpp_model", "")
+        self._populate_parakeet_cpp_models(saved_parakeet_model)
+        self._parakeet_cpp_model_combo.currentIndexChanged.connect(
+            self._on_parakeet_cpp_model_changed
+        )
+        parakeet_model_layout.addWidget(self._parakeet_cpp_model_combo)
+        self._parakeet_cpp_model_status = QLabel("")
+        self._parakeet_cpp_model_status.setStyleSheet("color: #888; font-size: 11px;")
+        parakeet_model_layout.addWidget(self._parakeet_cpp_model_status, 1)
+        self._parakeet_cpp_model_refresh_btn = QPushButton(
+            t("btn_refresh_parakeet_cpp_models")
+        )
+        self._parakeet_cpp_model_refresh_btn.clicked.connect(
+            self._refresh_parakeet_cpp_models
+        )
+        parakeet_model_layout.addWidget(self._parakeet_cpp_model_refresh_btn)
+        layout.addWidget(self._parakeet_cpp_model_group)
+        self._parakeet_cpp_model_group.setVisible(
+            self._selected_asr_engine() == "parakeet-cpp"
+        )
+
+        self._parakeet_cpp_runtime_group = QGroupBox(t("group_parakeet_cpp_runtime"))
+        parakeet_runtime_layout = QHBoxLayout(self._parakeet_cpp_runtime_group)
+        self._parakeet_cpp_runtime_combo = QComboBox()
+        saved_parakeet_runtime = s.get("parakeet_cpp_runtime_dir", "")
+        self._populate_parakeet_cpp_runtimes(saved_parakeet_runtime)
+        self._parakeet_cpp_runtime_combo.currentIndexChanged.connect(
+            self._on_parakeet_cpp_runtime_changed
+        )
+        parakeet_runtime_layout.addWidget(self._parakeet_cpp_runtime_combo)
+        self._parakeet_cpp_runtime_status = QLabel("")
+        self._parakeet_cpp_runtime_status.setStyleSheet(
+            "color: #888; font-size: 11px;"
+        )
+        parakeet_runtime_layout.addWidget(self._parakeet_cpp_runtime_status, 1)
+        self._parakeet_cpp_runtime_refresh_btn = QPushButton(
+            t("btn_refresh_parakeet_cpp_runtimes")
+        )
+        self._parakeet_cpp_runtime_refresh_btn.clicked.connect(
+            self._refresh_parakeet_cpp_runtimes
+        )
+        parakeet_runtime_layout.addWidget(self._parakeet_cpp_runtime_refresh_btn)
+        layout.addWidget(self._parakeet_cpp_runtime_group)
+        self._parakeet_cpp_runtime_group.setVisible(
+            self._selected_asr_engine() == "parakeet-cpp"
+        )
 
         # Remote ASR server URL — only visible when engine is Remote Whisper
         self._remote_group = QGroupBox("Remote ASR Server")
@@ -407,21 +557,51 @@ class ControlPanel(QWidget):
         self._remote_url_edit.editingFinished.connect(self._auto_save)
         remote_layout.addWidget(self._remote_url_edit, 1)
         layout.addWidget(self._remote_group)
-        self._remote_group.setVisible(engine_idx == 3)
+        self._remote_group.setVisible(
+            self._selected_asr_engine() == "remote-whisper"
+        )
+
+        self._asr_engine.currentIndexChanged.connect(
+            self._on_asr_engine_changed
+        )
+        self._on_asr_engine_changed(engine_idx)
+        self._update_whisper_size_label()
+        self._update_crispasr_status()
+        self._update_sherpa_onnx_status()
+        self._update_parakeet_cpp_model_status()
+        self._update_parakeet_cpp_runtime_status()
+
+        layout.addStretch()
+        return widget
+
+    # ── VAD Tab ──
+
+    def _create_vad_tab(self):
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        s = self._current_settings
 
         mode_group = QGroupBox(t("group_vad_mode"))
         mode_layout = QVBoxLayout(mode_group)
         self._vad_mode = QComboBox()
-        self._vad_mode.addItems([t("vad_silero"), t("vad_energy"), t("vad_disabled")])
-        mode_map = {"silero": 0, "energy": 1, "disabled": 2}
-        self._vad_mode.setCurrentIndex(mode_map.get(s.get("vad_mode", "energy"), 1))
+        for label, key in (
+            (t("vad_silero"), "silero"),
+            (t("vad_firered"), "firered"),
+            (t("vad_energy"), "energy"),
+            (t("vad_disabled"), "disabled"),
+        ):
+            self._vad_mode.addItem(label, key)
+        mode_idx = self._vad_mode.findData(s.get("vad_mode", "silero"))
+        if mode_idx < 0:
+            mode_idx = self._vad_mode.findData("silero")
+        self._vad_mode.setCurrentIndex(mode_idx)
         self._vad_mode.currentIndexChanged.connect(self._on_vad_mode_changed)
         self._vad_mode.currentIndexChanged.connect(self._auto_save)
         mode_layout.addWidget(self._vad_mode)
         layout.addWidget(mode_group)
 
-        silero_group = QGroupBox(t("group_silero_threshold"))
-        silero_layout = QGridLayout(silero_group)
+        self._neural_vad_group = QGroupBox(t("group_neural_vad_threshold"))
+        silero_layout = QGridLayout(self._neural_vad_group)
         self._vad_threshold_slider = QSlider(Qt.Orientation.Horizontal)
         self._vad_threshold_slider.setRange(0, 100)
         vad_pct = int(s.get("vad_threshold", 0.5) * 100)
@@ -433,10 +613,49 @@ class ControlPanel(QWidget):
         silero_layout.addWidget(QLabel(t("label_threshold")), 0, 0)
         silero_layout.addWidget(self._vad_threshold_slider, 0, 1)
         silero_layout.addWidget(self._vad_threshold_label, 0, 2)
-        layout.addWidget(silero_group)
+        layout.addWidget(self._neural_vad_group)
 
-        energy_group = QGroupBox(t("group_energy_threshold"))
-        energy_layout = QGridLayout(energy_group)
+        self._firered_vad_group = QGroupBox(t("group_firered_vad"))
+        firered_layout = QGridLayout(self._firered_vad_group)
+        firered_layout.setColumnStretch(1, 1)
+        self._firered_vad_model_combo = QComboBox()
+        saved_firered_model = s.get("firered_vad_model", "")
+        self._populate_firered_vad_models(saved_firered_model)
+        self._firered_vad_model_combo.currentIndexChanged.connect(
+            self._on_firered_vad_model_changed
+        )
+        self._firered_vad_status = QLabel("")
+        self._firered_vad_status.setStyleSheet("color: #888; font-size: 11px;")
+        self._firered_vad_refresh_btn = QPushButton(
+            t("btn_refresh_firered_vad_models")
+        )
+        self._firered_vad_refresh_btn.clicked.connect(
+            self._refresh_firered_vad_models
+        )
+        self._firered_vad_smooth_window = QSpinBox()
+        self._firered_vad_smooth_window.setRange(1, 30)
+        self._firered_vad_smooth_window.setValue(
+            int(s.get("firered_vad_smooth_window_size", 5) or 5)
+        )
+        self._firered_vad_smooth_window.valueChanged.connect(
+            self._on_firered_vad_setting_changed
+        )
+        self._firered_vad_use_gpu = QCheckBox(t("label_firered_vad_use_gpu"))
+        self._firered_vad_use_gpu.setChecked(bool(s.get("firered_vad_use_gpu", False)))
+        self._firered_vad_use_gpu.toggled.connect(
+            self._on_firered_vad_setting_changed
+        )
+        firered_layout.addWidget(QLabel(t("label_firered_vad_model")), 0, 0)
+        firered_layout.addWidget(self._firered_vad_model_combo, 0, 1)
+        firered_layout.addWidget(self._firered_vad_refresh_btn, 0, 2)
+        firered_layout.addWidget(self._firered_vad_status, 1, 1, 1, 2)
+        firered_layout.addWidget(QLabel(t("label_firered_vad_smooth_window")), 2, 0)
+        firered_layout.addWidget(self._firered_vad_smooth_window, 2, 1)
+        firered_layout.addWidget(self._firered_vad_use_gpu, 3, 1)
+        layout.addWidget(self._firered_vad_group)
+
+        self._energy_group = QGroupBox(t("group_energy_threshold"))
+        energy_layout = QGridLayout(self._energy_group)
         self._energy_slider = QSlider(Qt.Orientation.Horizontal)
         self._energy_slider.setRange(1, 100)
         energy_pm = int(s.get("energy_threshold", 0.03) * 1000)
@@ -448,7 +667,7 @@ class ControlPanel(QWidget):
         energy_layout.addWidget(QLabel(t("label_threshold")), 0, 0)
         energy_layout.addWidget(self._energy_slider, 0, 1)
         energy_layout.addWidget(self._energy_label, 0, 2)
-        layout.addWidget(energy_group)
+        layout.addWidget(self._energy_group)
 
         timing_group = QGroupBox(t("group_timing"))
         timing_layout = QGridLayout(timing_group)
@@ -494,8 +713,6 @@ class ControlPanel(QWidget):
         timing_layout.addWidget(QLabel(t("label_silence_dur")), 3, 0)
         timing_layout.addWidget(self._silence_duration, 3, 1)
 
-        from PyQt6.QtWidgets import QCheckBox
-
         self._incremental_asr_cb = QCheckBox(t("label_incremental_asr"))
         self._incremental_asr_cb.setToolTip(t("incremental_asr_tooltip"))
         self._incremental_asr_cb.setChecked(s.get("incremental_asr", False))
@@ -517,6 +734,8 @@ class ControlPanel(QWidget):
 
         layout.addWidget(timing_group)
 
+        self._update_firered_vad_status()
+        self._update_vad_detail_visibility()
         layout.addStretch()
         return widget
 
@@ -1094,7 +1313,11 @@ class ControlPanel(QWidget):
             return
         for name, path, _ in self._cache_entries:
             try:
-                shutil.rmtree(path)
+                path_obj = Path(path)
+                if path_obj.is_file():
+                    path_obj.unlink()
+                else:
+                    shutil.rmtree(path_obj)
                 log.info(f"Deleted: {path}")
             except Exception as e:
                 log.error(f"Failed to delete {path}: {e}")
@@ -1104,14 +1327,56 @@ class ControlPanel(QWidget):
         """Get the language code from the ASR language combo (stored as userData)."""
         return self._asr_lang.currentData() or "auto"
 
-    def _on_engine_changed_whisper_vis(self, index):
-        self._whisper_group.setVisible(index == 0)
-        is_funasr = index == 1
+    def _selected_vad_mode(self) -> str:
+        value = self._vad_mode.currentData()
+        return str(value) if value else "silero"
+
+    def _selected_asr_engine(self) -> str:
+        value = self._asr_engine.currentData()
+        return str(value) if value else "funasr"
+
+    def _on_asr_engine_changed(self, index):
+        engine = self._selected_asr_engine()
+        is_whisper = engine == "whisper"
+        is_funasr = engine == "funasr"
+        is_remote = engine == "remote-whisper"
+        is_crispasr = engine == "crispasr"
+        is_sherpa_onnx = engine == "sherpa-onnx"
+        is_parakeet_cpp = engine == "parakeet-cpp"
+        self._whisper_group.setVisible(is_whisper)
+        if hasattr(self, "_crispasr_group"):
+            self._crispasr_group.setVisible(is_crispasr)
+        if hasattr(self, "_sherpa_onnx_group"):
+            self._sherpa_onnx_group.setVisible(is_sherpa_onnx)
+        if hasattr(self, "_parakeet_cpp_model_group"):
+            self._parakeet_cpp_model_group.setVisible(is_parakeet_cpp)
+        if hasattr(self, "_parakeet_cpp_runtime_group"):
+            self._parakeet_cpp_runtime_group.setVisible(is_parakeet_cpp)
         if hasattr(self, "_funasr_model_combo"):
             self._funasr_model_label.setVisible(is_funasr)
             self._funasr_model_combo.setVisible(is_funasr)
+        if hasattr(self, "_crispasr_gpu_backend"):
+            self._crispasr_gpu_label.setVisible(is_crispasr)
+            self._crispasr_gpu_backend.setVisible(is_crispasr)
+            self._crispasr_device_label.setVisible(is_crispasr)
+            self._crispasr_device_index.setVisible(is_crispasr)
+            self._crispasr_punc_label.setVisible(is_crispasr)
+            self._crispasr_punc_model.setVisible(is_crispasr)
+            self._crispasr_unified_memory.setVisible(is_crispasr)
+        if hasattr(self, "_sherpa_onnx_provider"):
+            self._sherpa_onnx_provider_label.setVisible(is_sherpa_onnx)
+            self._sherpa_onnx_provider.setVisible(is_sherpa_onnx)
+            self._sherpa_onnx_threads_label.setVisible(is_sherpa_onnx)
+            self._sherpa_onnx_num_threads.setVisible(is_sherpa_onnx)
+            self._sherpa_onnx_decoding_label.setVisible(is_sherpa_onnx)
+            self._sherpa_onnx_decoding_method.setVisible(is_sherpa_onnx)
+        if hasattr(self, "_parakeet_cpp_backend"):
+            self._parakeet_cpp_backend_label.setVisible(is_parakeet_cpp)
+            self._parakeet_cpp_backend.setVisible(is_parakeet_cpp)
+            self._parakeet_cpp_decoder_label.setVisible(is_parakeet_cpp)
+            self._parakeet_cpp_decoder.setVisible(is_parakeet_cpp)
+            self._parakeet_cpp_word_timestamps.setVisible(is_parakeet_cpp)
         if hasattr(self, "_whisper_pad_seconds"):
-            is_whisper = index == 0
             self._whisper_pad_label.setVisible(is_whisper)
             self._whisper_pad_seconds.setVisible(is_whisper)
         if hasattr(self, "_sensevoice_pad_seconds"):
@@ -1121,7 +1386,7 @@ class ControlPanel(QWidget):
             self._sensevoice_pad_label.setVisible(show_funasr_pad)
             self._sensevoice_pad_seconds.setVisible(show_funasr_pad)
         if hasattr(self, "_remote_group"):
-            self._remote_group.setVisible(index == 3)
+            self._remote_group.setVisible(is_remote)
         # Resize window to fit content after whisper group visibility change
         def _fit():
             self.adjustSize()
@@ -1135,12 +1400,452 @@ class ControlPanel(QWidget):
 
     def _on_funasr_model_changed(self):
         self._current_settings["funasr_model"] = self._selected_funasr_model()
-        self._on_engine_changed_whisper_vis(self._asr_engine.currentIndex())
+        self._on_asr_engine_changed(self._asr_engine.currentIndex())
+        self._auto_save()
+
+    def _selected_crispasr_model(self) -> str:
+        value = self._crispasr_model_combo.currentData()
+        return str(value) if value is not None else ""
+
+    def _selected_crispasr_gpu_backend(self) -> str:
+        return ["auto", "cuda", "vulkan", "cpu"][self._crispasr_gpu_backend.currentIndex()]
+
+    def _selected_crispasr_punc_model(self) -> str:
+        value = self._crispasr_punc_model.currentData()
+        return str(value) if value else "auto"
+
+    def _on_crispasr_model_changed(self):
+        self._current_settings["crispasr_model"] = self._selected_crispasr_model()
+        self._update_crispasr_status()
+        self._auto_save()
+
+    def _on_crispasr_runtime_setting_changed(self):
+        self._current_settings["crispasr_gpu_backend"] = (
+            self._selected_crispasr_gpu_backend()
+        )
+        self._current_settings["crispasr_device_index"] = (
+            self._crispasr_device_index.value()
+        )
+        self._current_settings["crispasr_punc_model"] = (
+            self._selected_crispasr_punc_model()
+        )
+        self._current_settings["crispasr_unified_memory"] = (
+            self._crispasr_unified_memory.isChecked()
+        )
+        self._auto_save()
+
+    def _selected_sherpa_onnx_model(self) -> str:
+        value = self._sherpa_onnx_model_combo.currentData()
+        return str(value) if value is not None else ""
+
+    def _selected_sherpa_onnx_provider(self) -> str:
+        value = self._sherpa_onnx_provider.currentData()
+        return str(value) if value else "auto"
+
+    def _selected_sherpa_onnx_decoding_method(self) -> str:
+        value = self._sherpa_onnx_decoding_method.currentData()
+        return str(value) if value else "greedy_search"
+
+    def _on_sherpa_onnx_model_changed(self):
+        self._current_settings["sherpa_onnx_model"] = (
+            self._selected_sherpa_onnx_model()
+        )
+        self._update_sherpa_onnx_status()
+        self._auto_save()
+
+    def _on_sherpa_onnx_setting_changed(self):
+        self._current_settings["sherpa_onnx_provider"] = (
+            self._selected_sherpa_onnx_provider()
+        )
+        self._current_settings["sherpa_onnx_num_threads"] = (
+            self._sherpa_onnx_num_threads.value()
+        )
+        self._current_settings["sherpa_onnx_decoding_method"] = (
+            self._selected_sherpa_onnx_decoding_method()
+        )
+        self._auto_save()
+
+    def _selected_parakeet_cpp_model(self) -> str:
+        value = self._parakeet_cpp_model_combo.currentData()
+        return str(value) if value is not None else ""
+
+    def _selected_parakeet_cpp_runtime_dir(self) -> str:
+        value = self._parakeet_cpp_runtime_combo.currentData()
+        return str(value) if value is not None else ""
+
+    def _selected_parakeet_cpp_backend(self) -> str:
+        value = self._parakeet_cpp_backend.currentData()
+        return str(value) if value else "auto"
+
+    def _selected_parakeet_cpp_decoder(self) -> str:
+        value = self._parakeet_cpp_decoder.currentData()
+        return str(value) if value else "auto"
+
+    def _on_parakeet_cpp_model_changed(self):
+        self._current_settings["parakeet_cpp_model"] = (
+            self._selected_parakeet_cpp_model()
+        )
+        self._update_parakeet_cpp_model_status()
+        self._auto_save()
+
+    def _on_parakeet_cpp_runtime_changed(self):
+        self._current_settings["parakeet_cpp_runtime_dir"] = (
+            self._selected_parakeet_cpp_runtime_dir()
+        )
+        self._update_parakeet_cpp_runtime_status()
+        self._auto_save()
+
+    def _on_parakeet_cpp_setting_changed(self):
+        self._current_settings["parakeet_cpp_backend"] = (
+            self._selected_parakeet_cpp_backend()
+        )
+        self._current_settings["parakeet_cpp_decoder"] = (
+            self._selected_parakeet_cpp_decoder()
+        )
+        self._current_settings["parakeet_cpp_word_timestamps"] = (
+            self._parakeet_cpp_word_timestamps.isChecked()
+        )
+        self._update_parakeet_cpp_runtime_status()
+        self._auto_save()
+
+    def _selected_firered_vad_model(self) -> str:
+        value = self._firered_vad_model_combo.currentData()
+        return str(value) if value is not None else ""
+
+    def _on_firered_vad_model_changed(self):
+        self._current_settings["firered_vad_model"] = (
+            self._selected_firered_vad_model()
+        )
+        self._update_firered_vad_status()
+        self._auto_save()
+
+    def _on_firered_vad_setting_changed(self):
+        self._current_settings["firered_vad_smooth_window_size"] = (
+            self._firered_vad_smooth_window.value()
+        )
+        self._current_settings["firered_vad_use_gpu"] = (
+            self._firered_vad_use_gpu.isChecked()
+        )
         self._auto_save()
 
     def _selected_whisper_model(self) -> str:
         value = self._whisper_size_combo.currentData()
         return str(value) if value else self._whisper_size_combo.currentText()
+
+    def _populate_firered_vad_models(self, saved_value: str):
+        self._firered_vad_model_combo.clear()
+        self._firered_vad_model_combo.addItem(t("firered_vad_model_placeholder"), "")
+
+        local_prefix = t("firered_vad_local_prefix")
+        for item in list_local_firered_vad_models():
+            idx = self._firered_vad_model_combo.count()
+            self._firered_vad_model_combo.addItem(
+                f"{local_prefix}: {item['name']}", item["path"]
+            )
+            self._firered_vad_model_combo.setItemData(
+                idx, item["path"], Qt.ItemDataRole.ToolTipRole
+            )
+
+        if not saved_value:
+            selected = ""
+        else:
+            selected = resolve_custom_firered_vad_model(saved_value) or saved_value
+        idx = self._firered_vad_model_combo.findData(selected)
+        if idx < 0:
+            idx = self._firered_vad_model_combo.findText(saved_value)
+        if idx < 0 and selected:
+            label = f"{t('firered_vad_missing_local')}: {Path(str(selected)).name}"
+            idx = self._firered_vad_model_combo.count()
+            self._firered_vad_model_combo.addItem(label, selected)
+            self._firered_vad_model_combo.setItemData(
+                idx, str(selected), Qt.ItemDataRole.ToolTipRole
+            )
+        if idx >= 0:
+            self._firered_vad_model_combo.setCurrentIndex(idx)
+
+    def _refresh_firered_vad_models(self):
+        saved = self._selected_firered_vad_model()
+        self._populate_firered_vad_models(saved)
+        self._update_firered_vad_status()
+
+    def _update_firered_vad_status(self):
+        model_key = self._selected_firered_vad_model()
+        if not model_key:
+            if list_local_firered_vad_models():
+                self._firered_vad_status.setText(t("firered_vad_select_model"))
+            else:
+                self._firered_vad_status.setText(t("firered_vad_no_local_models"))
+            self._firered_vad_status.setStyleSheet(
+                "color: #888; font-size: 11px;"
+            )
+            return
+        if resolve_custom_firered_vad_model(model_key):
+            self._firered_vad_status.setText(t("firered_vad_local_ready"))
+            self._firered_vad_status.setStyleSheet(
+                "color: #4a4; font-size: 11px;"
+            )
+        else:
+            self._firered_vad_status.setText(t("firered_vad_invalid_local"))
+            self._firered_vad_status.setStyleSheet(
+                "color: #d66; font-size: 11px;"
+            )
+
+    def _populate_sherpa_onnx_models(self, saved_value: str):
+        self._sherpa_onnx_model_combo.clear()
+        self._sherpa_onnx_model_combo.addItem(t("sherpa_onnx_model_placeholder"), "")
+
+        local_prefix = t("sherpa_onnx_local_prefix")
+        for item in list_local_sherpa_onnx_models():
+            idx = self._sherpa_onnx_model_combo.count()
+            family = str(item.get("family") or "").replace("_", " ")
+            suffix = f" [{family}]" if family else ""
+            self._sherpa_onnx_model_combo.addItem(
+                f"{local_prefix}: {item['name']}{suffix}", item["path"]
+            )
+            self._sherpa_onnx_model_combo.setItemData(
+                idx, item["path"], Qt.ItemDataRole.ToolTipRole
+            )
+
+        if not saved_value:
+            selected = ""
+        else:
+            selected = resolve_custom_sherpa_onnx_model(saved_value) or saved_value
+        idx = self._sherpa_onnx_model_combo.findData(selected)
+        if idx < 0:
+            idx = self._sherpa_onnx_model_combo.findText(saved_value)
+        if idx < 0 and selected:
+            label = f"{t('sherpa_onnx_missing_local')}: {Path(str(selected)).name}"
+            idx = self._sherpa_onnx_model_combo.count()
+            self._sherpa_onnx_model_combo.addItem(label, selected)
+            self._sherpa_onnx_model_combo.setItemData(
+                idx, str(selected), Qt.ItemDataRole.ToolTipRole
+            )
+        if idx >= 0:
+            self._sherpa_onnx_model_combo.setCurrentIndex(idx)
+
+    def _refresh_sherpa_onnx_models(self):
+        saved = self._selected_sherpa_onnx_model()
+        self._populate_sherpa_onnx_models(saved)
+        self._update_sherpa_onnx_status()
+
+    def _update_sherpa_onnx_status(self):
+        from model_manager import is_asr_cached
+
+        model_key = self._selected_sherpa_onnx_model()
+        if not model_key:
+            if list_local_sherpa_onnx_models():
+                self._sherpa_onnx_status.setText(t("sherpa_onnx_select_model"))
+            else:
+                self._sherpa_onnx_status.setText(t("sherpa_onnx_no_local_models"))
+            self._sherpa_onnx_status.setStyleSheet("color: #888; font-size: 11px;")
+            return
+        cached = is_asr_cached("sherpa-onnx", model_key, self._current_settings.get("hub", "ms"))
+        if cached:
+            self._sherpa_onnx_status.setText(t("sherpa_onnx_local_ready"))
+            self._sherpa_onnx_status.setStyleSheet("color: #4a4; font-size: 11px;")
+        else:
+            self._sherpa_onnx_status.setText(t("sherpa_onnx_invalid_local"))
+            self._sherpa_onnx_status.setStyleSheet("color: #d66; font-size: 11px;")
+
+    def _populate_parakeet_cpp_models(self, saved_value: str):
+        self._parakeet_cpp_model_combo.clear()
+        self._parakeet_cpp_model_combo.addItem(
+            t("parakeet_cpp_model_placeholder"), ""
+        )
+
+        local_prefix = t("parakeet_cpp_local_prefix")
+        for item in list_local_parakeet_cpp_models():
+            idx = self._parakeet_cpp_model_combo.count()
+            self._parakeet_cpp_model_combo.addItem(
+                f"{local_prefix}: {item['name']}", item["path"]
+            )
+            self._parakeet_cpp_model_combo.setItemData(
+                idx, item["path"], Qt.ItemDataRole.ToolTipRole
+            )
+
+        if not saved_value:
+            selected = ""
+        else:
+            selected = resolve_custom_parakeet_cpp_model(saved_value) or saved_value
+        idx = self._parakeet_cpp_model_combo.findData(selected)
+        if idx < 0:
+            idx = self._parakeet_cpp_model_combo.findText(saved_value)
+        if idx < 0 and selected:
+            label = f"{t('parakeet_cpp_missing_local')}: {Path(str(selected)).name}"
+            idx = self._parakeet_cpp_model_combo.count()
+            self._parakeet_cpp_model_combo.addItem(label, selected)
+            self._parakeet_cpp_model_combo.setItemData(
+                idx, str(selected), Qt.ItemDataRole.ToolTipRole
+            )
+        if idx >= 0:
+            self._parakeet_cpp_model_combo.setCurrentIndex(idx)
+
+    def _populate_parakeet_cpp_runtimes(self, saved_value: str):
+        self._parakeet_cpp_runtime_combo.clear()
+        self._parakeet_cpp_runtime_combo.addItem(
+            t("parakeet_cpp_runtime_placeholder"), ""
+        )
+
+        local_prefix = t("parakeet_cpp_local_prefix")
+        for item in list_local_parakeet_cpp_runtimes():
+            idx = self._parakeet_cpp_runtime_combo.count()
+            backend = str(item.get("backend") or "").lower()
+            suffix = f" [{backend}]" if backend and backend != "unknown" else ""
+            self._parakeet_cpp_runtime_combo.addItem(
+                f"{local_prefix}: {item['name']}{suffix}", item["path"]
+            )
+            self._parakeet_cpp_runtime_combo.setItemData(
+                idx, item["path"], Qt.ItemDataRole.ToolTipRole
+            )
+
+        if not saved_value:
+            selected = ""
+        else:
+            selected = (
+                resolve_parakeet_cpp_runtime_dir(saved_value, "auto")
+                or saved_value
+            )
+        idx = self._parakeet_cpp_runtime_combo.findData(selected)
+        if idx < 0:
+            idx = self._parakeet_cpp_runtime_combo.findText(saved_value)
+        if idx < 0 and selected:
+            label = f"{t('parakeet_cpp_missing_local')}: {Path(str(selected)).name}"
+            idx = self._parakeet_cpp_runtime_combo.count()
+            self._parakeet_cpp_runtime_combo.addItem(label, selected)
+            self._parakeet_cpp_runtime_combo.setItemData(
+                idx, str(selected), Qt.ItemDataRole.ToolTipRole
+            )
+        if idx >= 0:
+            self._parakeet_cpp_runtime_combo.setCurrentIndex(idx)
+
+    def _refresh_parakeet_cpp_models(self):
+        saved = self._selected_parakeet_cpp_model()
+        self._populate_parakeet_cpp_models(saved)
+        self._update_parakeet_cpp_model_status()
+
+    def _refresh_parakeet_cpp_runtimes(self):
+        saved = self._selected_parakeet_cpp_runtime_dir()
+        self._populate_parakeet_cpp_runtimes(saved)
+        self._update_parakeet_cpp_runtime_status()
+
+    def _update_parakeet_cpp_model_status(self):
+        from model_manager import is_asr_cached
+
+        model_key = self._selected_parakeet_cpp_model()
+        if not model_key:
+            if list_local_parakeet_cpp_models():
+                self._parakeet_cpp_model_status.setText(
+                    t("parakeet_cpp_select_model")
+                )
+            else:
+                self._parakeet_cpp_model_status.setText(
+                    t("parakeet_cpp_no_local_models")
+                )
+            self._parakeet_cpp_model_status.setStyleSheet(
+                "color: #888; font-size: 11px;"
+            )
+            return
+        cached = is_asr_cached(
+            "parakeet-cpp", model_key, self._current_settings.get("hub", "ms")
+        )
+        if cached:
+            self._parakeet_cpp_model_status.setText(
+                t("parakeet_cpp_local_ready")
+            )
+            self._parakeet_cpp_model_status.setStyleSheet(
+                "color: #4a4; font-size: 11px;"
+            )
+        else:
+            self._parakeet_cpp_model_status.setText(
+                t("parakeet_cpp_invalid_local")
+            )
+            self._parakeet_cpp_model_status.setStyleSheet(
+                "color: #d66; font-size: 11px;"
+            )
+
+    def _update_parakeet_cpp_runtime_status(self):
+        from model_manager import detect_parakeet_cpp_runtime_dir
+
+        runtime_dir = self._selected_parakeet_cpp_runtime_dir()
+        backend = self._selected_parakeet_cpp_backend()
+        if not runtime_dir:
+            if list_local_parakeet_cpp_runtimes():
+                self._parakeet_cpp_runtime_status.setText(
+                    t("parakeet_cpp_select_runtime")
+                )
+            else:
+                self._parakeet_cpp_runtime_status.setText(
+                    t("parakeet_cpp_no_local_runtimes")
+                )
+            self._parakeet_cpp_runtime_status.setStyleSheet(
+                "color: #888; font-size: 11px;"
+            )
+            return
+        resolved = resolve_parakeet_cpp_runtime_dir(runtime_dir, "auto")
+        info = detect_parakeet_cpp_runtime_dir(resolved) if resolved else None
+        if not info:
+            self._parakeet_cpp_runtime_status.setText(
+                t("parakeet_cpp_invalid_runtime")
+            )
+            self._parakeet_cpp_runtime_status.setStyleSheet(
+                "color: #d66; font-size: 11px;"
+            )
+            return
+        runtime_backend = str(info.get("backend") or "unknown")
+        missing = info.get("missing_dependencies") or []
+        if backend != "auto" and runtime_backend not in ("unknown", backend):
+            self._parakeet_cpp_runtime_status.setText(
+                t("parakeet_cpp_invalid_runtime")
+            )
+            self._parakeet_cpp_runtime_status.setStyleSheet(
+                "color: #d66; font-size: 11px;"
+            )
+            return
+        if missing:
+            self._parakeet_cpp_runtime_status.setText(
+                f"{t('parakeet_cpp_runtime_ready')} ({', '.join(missing)}?)"
+            )
+            self._parakeet_cpp_runtime_status.setStyleSheet(
+                "color: #d99; font-size: 11px;"
+            )
+            return
+        self._parakeet_cpp_runtime_status.setText(
+            t("parakeet_cpp_runtime_ready")
+        )
+        self._parakeet_cpp_runtime_status.setStyleSheet(
+            "color: #4a4; font-size: 11px;"
+        )
+
+    def _populate_crispasr_models(self, saved_value: str):
+        self._crispasr_model_combo.clear()
+        self._crispasr_model_combo.addItem(t("crispasr_model_placeholder"), "")
+
+        local_prefix = t("crispasr_local_prefix")
+        for item in list_local_crispasr_models():
+            idx = self._crispasr_model_combo.count()
+            self._crispasr_model_combo.addItem(
+                f"{local_prefix}: {item['name']}", item["path"]
+            )
+            self._crispasr_model_combo.setItemData(
+                idx, item["path"], Qt.ItemDataRole.ToolTipRole
+            )
+
+        if not saved_value:
+            selected = ""
+        else:
+            selected = resolve_custom_crispasr_model(saved_value) or saved_value
+        idx = self._crispasr_model_combo.findData(selected)
+        if idx < 0:
+            idx = self._crispasr_model_combo.findText(saved_value)
+        if idx < 0 and selected:
+            label = f"{t('crispasr_missing_local')}: {Path(str(selected)).name}"
+            idx = self._crispasr_model_combo.count()
+            self._crispasr_model_combo.addItem(label, selected)
+            self._crispasr_model_combo.setItemData(
+                idx, str(selected), Qt.ItemDataRole.ToolTipRole
+            )
+        if idx >= 0:
+            self._crispasr_model_combo.setCurrentIndex(idx)
 
     def _populate_whisper_models(self, saved_value: str):
         self._whisper_size_combo.clear()
@@ -1228,6 +1933,23 @@ class ControlPanel(QWidget):
             # Switch to Whisper engine with the downloaded size
             self._auto_save()
 
+    def _update_crispasr_status(self):
+        from model_manager import is_asr_cached
+
+        model_key = self._selected_crispasr_model()
+        if not model_key:
+            self._crispasr_status.setText(t("crispasr_select_model"))
+            self._crispasr_status.setStyleSheet("color: #888; font-size: 11px;")
+            return
+        hub = self._current_settings.get("hub", "ms")
+        cached = is_asr_cached("crispasr", model_key, hub)
+        if cached:
+            self._crispasr_status.setText(t("crispasr_local_ready"))
+            self._crispasr_status.setStyleSheet("color: #4a4; font-size: 11px;")
+        else:
+            self._crispasr_status.setText(t("crispasr_invalid_local"))
+            self._crispasr_status.setStyleSheet("color: #d66; font-size: 11px;")
+
     # ── Model Management ──
 
     def _refresh_model_list(self):
@@ -1246,6 +1968,59 @@ class ControlPanel(QWidget):
                 font.setBold(True)
                 item.setFont(font)
             self._model_list.addItem(item)
+
+    def refresh_model_list(self):
+        self._refresh_model_list()
+
+    def current_settings(self) -> dict:
+        return dict(self._current_settings)
+
+    def set_active_model(self, index: int, save: bool = True, emit: bool = True) -> bool:
+        models = self._current_settings.get("models", [])
+        if not (0 <= index < len(models)):
+            return False
+        self._current_settings["active_model"] = index
+        self._refresh_model_list()
+        if save:
+            _save_settings(self._current_settings)
+        self._emit_models_list_changed()
+        if emit:
+            self.model_changed.emit(models[index])
+        return True
+
+    def set_target_language(self, code: str, save: bool = True):
+        self._current_settings["target_language"] = code
+        if save:
+            _save_settings(self._current_settings)
+
+    def set_asr_language(self, code: str, save: bool = True, emit: bool = False):
+        self._current_settings["asr_language"] = code
+        idx = self._asr_lang.findData(code)
+        if idx >= 0:
+            self._asr_lang.blockSignals(True)
+            self._asr_lang.setCurrentIndex(idx)
+            self._asr_lang.blockSignals(False)
+        if save:
+            _save_settings(self._current_settings)
+        if emit:
+            self.asr_language_changed.emit(code)
+
+    def current_asr_language(self) -> str:
+        return self._get_asr_lang_code()
+
+    def update_subtitle_mode(self, patch: dict, save: bool = True) -> dict:
+        mode = dict(self._current_settings.get("subtitle_mode") or {})
+        mode.update(patch)
+        self._current_settings["subtitle_mode"] = mode
+        if save:
+            _save_settings(self._current_settings)
+        return mode
+
+    def update_settings(self, patch: dict, save: bool = True) -> dict:
+        self._current_settings.update(patch)
+        if save:
+            _save_settings(self._current_settings)
+        return dict(self._current_settings)
 
     def _emit_models_list_changed(self):
         models = self._current_settings.get("models", [])
@@ -1353,8 +2128,19 @@ class ControlPanel(QWidget):
         self._silence_duration.setEnabled(index == 1)
 
     def _on_vad_mode_changed(self, index):
-        modes = ["silero", "energy", "disabled"]
-        self._current_settings["vad_mode"] = modes[index]
+        self._current_settings["vad_mode"] = self._selected_vad_mode()
+        self._update_vad_detail_visibility()
+
+    def _update_vad_detail_visibility(self):
+        if not hasattr(self, "_vad_mode"):
+            return
+        mode = self._selected_vad_mode()
+        if hasattr(self, "_neural_vad_group"):
+            self._neural_vad_group.setVisible(mode in ("silero", "firered"))
+        if hasattr(self, "_firered_vad_group"):
+            self._firered_vad_group.setVisible(mode == "firered")
+        if hasattr(self, "_energy_group"):
+            self._energy_group.setVisible(mode == "energy")
 
     def _on_threshold_changed(self, value):
         val = value / 100.0
@@ -1434,15 +2220,17 @@ class ControlPanel(QWidget):
 
     def _apply_settings(self):
         self._current_settings["asr_language"] = self._get_asr_lang_code()
-        engine_map = {
-            0: "whisper",
-            1: "funasr",
-            2: "anime-whisper",
-            3: "remote-whisper",
-        }
-        self._current_settings["asr_engine"] = engine_map.get(
-            self._asr_engine.currentIndex(), "whisper"
+        self._current_settings["vad_mode"] = self._selected_vad_mode()
+        self._current_settings["firered_vad_model"] = (
+            self._selected_firered_vad_model()
         )
+        self._current_settings["firered_vad_smooth_window_size"] = (
+            self._firered_vad_smooth_window.value()
+        )
+        self._current_settings["firered_vad_use_gpu"] = (
+            self._firered_vad_use_gpu.isChecked()
+        )
+        self._current_settings["asr_engine"] = self._selected_asr_engine()
         self._current_settings["funasr_model"] = self._selected_funasr_model()
         if hasattr(self, "_remote_url_edit"):
             url = self._remote_url_edit.text().strip()
@@ -1450,6 +2238,47 @@ class ControlPanel(QWidget):
                 self._current_settings["remote_asr_url"] = url
         self._current_settings["whisper_model_size"] = (
             self._selected_whisper_model()
+        )
+        self._current_settings["crispasr_model"] = self._selected_crispasr_model()
+        self._current_settings["crispasr_backend"] = "auto"
+        self._current_settings["crispasr_gpu_backend"] = (
+            self._selected_crispasr_gpu_backend()
+        )
+        self._current_settings["crispasr_device_index"] = (
+            self._crispasr_device_index.value()
+        )
+        self._current_settings["crispasr_punc_model"] = (
+            self._selected_crispasr_punc_model()
+        )
+        self._current_settings["crispasr_unified_memory"] = (
+            self._crispasr_unified_memory.isChecked()
+        )
+        self._current_settings["sherpa_onnx_model"] = (
+            self._selected_sherpa_onnx_model()
+        )
+        self._current_settings["sherpa_onnx_provider"] = (
+            self._selected_sherpa_onnx_provider()
+        )
+        self._current_settings["sherpa_onnx_num_threads"] = (
+            self._sherpa_onnx_num_threads.value()
+        )
+        self._current_settings["sherpa_onnx_decoding_method"] = (
+            self._selected_sherpa_onnx_decoding_method()
+        )
+        self._current_settings["parakeet_cpp_model"] = (
+            self._selected_parakeet_cpp_model()
+        )
+        self._current_settings["parakeet_cpp_runtime_dir"] = (
+            self._selected_parakeet_cpp_runtime_dir()
+        )
+        self._current_settings["parakeet_cpp_backend"] = (
+            self._selected_parakeet_cpp_backend()
+        )
+        self._current_settings["parakeet_cpp_decoder"] = (
+            self._selected_parakeet_cpp_decoder()
+        )
+        self._current_settings["parakeet_cpp_word_timestamps"] = (
+            self._parakeet_cpp_word_timestamps.isChecked()
         )
         dev_text = self._asr_device.currentText()
         self._current_settings["asr_device"] = dev_text.split(" (")[0]
@@ -1497,7 +2326,7 @@ class ControlPanel(QWidget):
         self.settings_changed.emit(dict(self._current_settings))
 
     def get_settings(self):
-        return dict(self._current_settings)
+        return self.current_settings()
 
     def get_active_model(self) -> dict | None:
         models = self._current_settings.get("models", [])

@@ -27,7 +27,6 @@ class FunASRNanoEngine:
         from model_manager import (
             ASR_MODEL_IDS,
             get_local_model_path,
-            neutralize_funasr_requirements,
         )
 
         model_name = ASR_MODEL_IDS[engine_type]
@@ -36,7 +35,6 @@ class FunASRNanoEngine:
 
         if local:
             self._ensure_qwen_weights(local)
-            neutralize_funasr_requirements(local)
 
         prev_cwd = os.getcwd()
         if local:

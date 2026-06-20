@@ -47,23 +47,35 @@ if errorlevel 1 (
 )
 
 :: Check venv
-if not exist ".venv\Scripts\pip.exe" (
+if not exist ".venv\Scripts\python.exe" (
     echo.
     echo Virtual environment not found, running install.bat...
     call install.bat
     exit /b %errorlevel%
 )
 
-:: Update dependencies
-echo.
-echo Updating dependencies...
-.venv\Scripts\pip.exe install -r requirements.txt --quiet
+:: Check uv
+uv --version >nul 2>&1
 if errorlevel 1 (
-    echo [WARN] Some dependencies failed to update.
+    echo.
+    echo uv not found, running install.bat...
+    call install.bat
+    exit /b %errorlevel%
 )
 
-.venv\Scripts\pip.exe install funasr --no-deps --quiet
-.venv\Scripts\pip.exe install pysbd --quiet
+:: Update dependencies
+echo.
+echo Syncing dependencies...
+uv sync --python .venv\Scripts\python.exe --locked --inexact --no-install-package torch --no-install-package torchaudio --quiet
+if errorlevel 1 (
+    echo [WARN] Some dependencies failed to sync.
+)
+
+if exist "repair_torch_metadata.ps1" (
+    powershell -NoProfile -ExecutionPolicy Bypass -File "repair_torch_metadata.ps1" -PythonExe ".venv\Scripts\python.exe"
+)
+
+uv pip install --python .venv\Scripts\python.exe funasr --no-deps --quiet
 
 echo.
 echo ========================================

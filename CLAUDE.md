@@ -24,19 +24,24 @@ The pipeline runs in a background thread: **Audio Capture (32ms chunks) -> VAD -
 ```
 main.py (LiveTranslateApp)
   |-- model_manager.py     Centralized model detection, download, cache utils
+  |-- pipeline_controller.py Audio capture + VAD + ASR queue controller, incremental ASR coordination
   |-- audio_capture.py     WASAPI loopback via pyaudiowpatch, auto-reconnects on device change
-  |-- vad_processor.py     Silero VAD / energy-based / disabled modes, progressive silence + backtrack split
+  |-- vad_processor.py     Silero VAD / FireRedVAD / energy-based / disabled modes, progressive silence + backtrack split
+  |-- vad_firered.py      FireRedVAD streaming rolling-frame confidence adapter
   |-- asr_client.py        Main-process ASR worker manager (spawn, Pipe IPC, timeouts)
   |-- asr_worker.py        ASR subprocess entrypoint; loads and owns one backend/model
   |-- asr_engine.py        faster-whisper (Whisper) backend
   |-- asr_sensevoice.py    FunASR SenseVoice backend (better for Japanese)
   |-- asr_funasr_nano.py   FunASR Nano backend
   |-- asr_anime_whisper.py Anime-Whisper backend (litagin/anime-whisper, ja anime/galgame)
+  |-- asr_crispasr.py     CrispASR ggml runtime backend (GGUF/bin single-file models)
+  |-- asr_sherpa_onnx.py  sherpa-onnx OfflineRecognizer/OnlineRecognizer backend (local ONNX model dirs)
+  |-- asr_parakeet_cpp.py parakeet.cpp C API backend (local GGUF model + native runtime)
   |-- translator.py        OpenAI-compatible API client, streaming, JSON schema, context history
   |-- subtitle_overlay.py  PyQt6 transparent overlay (2-row header: controls + model/lang combos)
   |-- subtitle_window.py   Standalone subtitle window for OBS capture (outlined text, animations)
   |-- subtitle_settings.py Subtitle window settings UI (grid layout, text line editor)
-  |-- control_panel.py     Settings UI (7 tabs: VAD/ASR, Translation, Style, Subtitle, Benchmark, Cache, Changelog)
+  |-- control_panel.py     Settings UI (8 tabs: ASR, VAD, Translation, Style, Subtitle, Benchmark, Cache, Changelog)
   |-- dialogs.py           Setup wizard, model download/load dialogs, ModelEditDialog
   |-- benchmark.py         Translation benchmark (BENCH_SENTENCES, run_benchmark())
   |-- log_window.py        Real-time log viewer
@@ -45,12 +50,12 @@ main.py (LiveTranslateApp)
 ### Threading / Process Model
 
 - **Main thread**: Qt event loop (all UI)
-- **Capture thread**: `_capture_loop` in `LiveTranslateApp` reads audio and runs VAD
-- **ASR queue thread**: `_asr_loop` drains VAD segments and calls `ASRClient.transcribe()`
+- **Capture thread**: `_capture_loop` in `PipelineController` reads audio and runs VAD
+- **ASR queue thread**: `_asr_loop` in `PipelineController` drains VAD segments and calls ASR via `ASRService`
 - **ASR worker process**: `asr_worker.py` owns the concrete ASR backend/model and runs inference over `multiprocessing.Pipe`
 - **ASR loading**: `_switch_asr_engine()` stops the current worker, then starts the target worker in a background thread; if target loading fails, it restarts the previous worker from its saved config
 - Cross-thread UI updates use **Qt signals** (e.g., `add_message_signal`, `update_translation_signal`)
-- ASR readiness tracked by `_asr_ready` flag; pipeline drops segments while no ready worker exists
+- ASR readiness tracked by `ASRService`; `PipelineController` drops segments while no ready worker exists
 
 ### Configuration
 
@@ -146,6 +151,7 @@ Continuous speech is processed incrementally to reduce latency (enabled by `incr
 
 ### VAD Behavior
 
+- **FireRedVAD mode**: `vad_firered.py` lazy-imports `fireredvad` and adapts LiveTranslate 32ms float32 chunks into FireRedVAD 25ms/10ms streaming frames. FireRedVAD only supplies speech confidence; `VADProcessor` still owns segmentation, silence handling, backtrack splitting, incremental ASR buffer state, and ASR queue contract.
 - **Progressive silence**: Buffer越长接受越短的停顿切分 (<3s=full, 3-6s=half, 6-10s=quarter of silence_limit)
 - **Adaptive silence**: Tracks recent pause durations, sets threshold to P75 × 1.2, auto-adjusts between 0.3s~2.0s
 - **Backtrack split**: Max duration时回溯smoothed confidence history找最低谷切分，remainder保留到下一段
@@ -165,13 +171,23 @@ Continuous speech is processed incrementally to reduce latency (enabled by `incr
 - FunASR Nano: `asr_funasr_nano.py` does `os.chdir(model_dir)` before `AutoModel()` inside the ASR worker process, so relative paths in config.yaml (e.g. `Qwen3-0.6B`) resolve locally instead of triggering HuggingFace Hub network requests, without changing the GUI process cwd
 - `Translator` defaults to 10s timeout via `make_openai_client()` to prevent API calls from hanging indefinitely
 - Log window is created at startup but hidden; shown via tray menu "Show Log"
-- Audio chunk duration is 32ms (512 samples at 16kHz), matching Silero VAD's native window size for minimal latency
+- Audio chunk duration is 32ms (512 samples at 16kHz), matching Silero VAD's native window size for minimal latency. FireRedVAD keeps this capture cadence and internally rolls 25ms windows with 10ms shifts.
+- FireRedVAD model discovery expects the official `Stream-VAD` directory containing `cmvn.ark` and `model.pth.tar`; the model is optional and not part of first-launch required downloads.
+- FireRedVAD input scaling is explicit: LiveTranslate keeps ASR/VAD buffers as float32 PCM, while `vad_firered.py` clips to [-1, 1] and multiplies by 32768 before calling `detect_frame()`.
 - FunASR `disable_pbar=True` required in all `generate()` calls — tqdm crashes in GUI process when flushing stderr
 - ASR engine lifecycle: the GUI process never instantiates `ASREngine`, `FunASREngine`, or `AnimeWhisperEngine` directly. It owns an `ASRClient`; each worker process owns one concrete backend/model. Engine/model/device changes shut down the current worker first, then start a new worker. On target load failure, the saved previous worker config is used to restore ASR.
+- CrispASR is treated as a ggml C++ runtime hub with GGUF/bin single-file weights. The GUI process never imports `crispasr`; `asr_crispasr.py` imports the Python binding only inside the ASR worker process and adapts results to the common ASR dict.
+- sherpa-onnx is treated as a local ONNX ASR runtime. The GUI process never imports `sherpa_onnx`; `asr_sherpa_onnx.py` imports it lazily inside the ASR worker after any CUDA device mapping is finalized. Offline families use `OfflineRecognizer`; `online_transducer` uses `OnlineRecognizer` as a VAD segment wrapper, not true partial streaming.
+- parakeet.cpp is treated as a worker-only native C API backend. The GUI process never loads the parakeet DLL; `asr_parakeet_cpp.py` uses `ctypes` only inside the ASR worker, loads one local `.gguf` once, and returns the common ASR dict.
+- parakeet.cpp model scanning only accepts known official GGUF filename prefixes or explicit sidecar metadata (`family=parakeet_cpp` / `architecture=parakeet`). CrispASR scanning excludes recognized parakeet GGUF files to avoid `.gguf` list pollution.
+- parakeet.cpp C API returned strings must be released with `parakeet_capi_free_string()`, and loaded contexts must be released with `parakeet_capi_free()`.
+- parakeet.cpp runtime DLL paths are added only inside the worker with `os.add_dll_directory()`. CUDA runtime may require the matching `cudart-parakeet-bin-win-cuda-x64.zip` DLLs beside the parakeet runtime.
+- CrispASR packaging has two parts that must stay aligned: `pyproject.toml` installs the pure-Python binding from the CrispASR release tag via `uv sync`, while `install.ps1` and the portable `bootstrap.ps1` download the matching prebuilt Windows `libcrispasr` DLL runtime from GitHub Releases. Do not replace this with plain `crispasr` from PyPI; that package name may not exist in the configured registry and the binding alone does not include `crispasr.dll`.
+- CrispASR native runtime install prefers `libcrispasr-windows-x86_64-cuda.tar.gz` on NVIDIA systems and falls back to `libcrispasr-windows-x86_64.tar.gz`. DLLs are copied next to the installed `crispasr` package so the worker can load them without a global PATH edit.
 - Whisper (ctranslate2) only accepts `device="cuda"` not `"cuda:0"`; device index passed via `device_index` param. Parsed from combo text like `"cuda:0 (RTX 4090)"` in `_switch_asr_engine`
 - ASR text density filter: segments ≥2s producing ≤3 alnum characters are discarded as noise
 - Settings file uses atomic write (write to `.tmp` then `os.replace`) to prevent corruption on crash
-- `stop()` joins pipeline thread before flushing VAD to prevent concurrent `_process_segment` calls
+- `PipelineController.stop()` joins capture/ASR queue threads before flushing VAD to prevent concurrent segment processing
 - Cancelled ASR download leaves the current worker running; failed target worker load attempts to restore the previous worker config
 - `Translator._build_system_prompt` catches format errors in user prompt templates, falls back to DEFAULT_PROMPT
 - Translation prompt presets: `PROMPT_PRESETS` in `translator.py` (daily/esports/anime), selectable via control panel combo

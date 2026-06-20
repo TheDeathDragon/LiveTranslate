@@ -85,6 +85,7 @@ $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $Root
 $Uv = Join-Path $Root "tools\uv.exe"
 $env:UV_LINK_MODE = "copy"
+$CrispAsrVersion = "v0.7.2"
 
 function Enable-SystemProxy {
     # uv (Python download) and pip honor *_PROXY env vars but not the Windows
@@ -121,6 +122,60 @@ function Enable-SystemProxy {
 }
 Enable-SystemProxy
 
+function Install-CrispAsrNativeRuntime {
+    param(
+        [string]$PythonExe,
+        [bool]$UseCuda
+    )
+
+    Write-Host "Installing CrispASR native runtime..." -ForegroundColor Cyan
+    try {
+        $target = & $PythonExe -c "import crispasr, pathlib; print(pathlib.Path(crispasr.__file__).resolve().parent)"
+        if ($LASTEXITCODE -ne 0 -or -not $target) {
+            throw "Could not locate the installed crispasr package"
+        }
+        $target = $target.Trim()
+        if (-not (Test-Path $target)) {
+            throw "Python package 'crispasr' is not installed"
+        }
+
+        $variant = if ($UseCuda) { "cuda" } else { "cpu" }
+        $asset = if ($UseCuda) {
+            "libcrispasr-windows-x86_64-cuda.tar.gz"
+        } else {
+            "libcrispasr-windows-x86_64.tar.gz"
+        }
+        $url = "https://github.com/CrispStrobe/CrispASR/releases/download/$CrispAsrVersion/$asset"
+        $tmpDir = Join-Path $env:TEMP "livetranslate-crispasr-$variant"
+        $archive = Join-Path $tmpDir $asset
+        if (Test-Path $tmpDir) { Remove-Item -Recurse -Force $tmpDir }
+        New-Item -ItemType Directory -Force -Path $tmpDir | Out-Null
+
+        Write-Host "Downloading $asset" -ForegroundColor Gray
+        Invoke-WebRequest -Uri $url -OutFile $archive
+        & tar -xzf $archive -C $tmpDir
+        if ($LASTEXITCODE -ne 0) { throw "Failed to extract $asset" }
+
+        $runtimeRoot = Get-ChildItem -Path $tmpDir -Directory | Select-Object -First 1
+        if (-not $runtimeRoot) { throw "Extracted CrispASR runtime directory not found" }
+        $bin = Join-Path $runtimeRoot.FullName "bin"
+        if (-not (Test-Path (Join-Path $bin "crispasr.dll"))) {
+            throw "crispasr.dll not found in $asset"
+        }
+
+        Copy-Item -Path (Join-Path $bin "*.dll") -Destination $target -Force
+        Write-Host "CrispASR native runtime installed ($variant)" -ForegroundColor Green
+    } catch {
+        if ($UseCuda) {
+            Write-Host "CUDA CrispASR runtime failed: $($_.Exception.Message)" -ForegroundColor Yellow
+            Install-CrispAsrNativeRuntime -PythonExe $PythonExe -UseCuda $false
+        } else {
+            Write-Host "CrispASR native runtime installation failed: $($_.Exception.Message)" -ForegroundColor Yellow
+            Write-Host "CrispASR will not run until libcrispasr/crispasr.dll is installed" -ForegroundColor Yellow
+        }
+    }
+}
+
 Write-Host "Creating virtual environment with Python 3.12..." -ForegroundColor Cyan
 & $Uv venv --python 3.12 --managed-python .venv
 if ($LASTEXITCODE -ne 0) { Write-Host "Failed to create venv" -ForegroundColor Red; exit 1 }
@@ -144,11 +199,21 @@ Write-Host "Installing PyTorch (this may take a while)..." -ForegroundColor Cyan
 if ($LASTEXITCODE -ne 0) { Write-Host "PyTorch install failed" -ForegroundColor Red; exit 1 }
 
 Write-Host "Installing dependencies..." -ForegroundColor Cyan
-& $Uv pip install --python $Py -r requirements.txt
+& $Uv sync --python $Py --locked --inexact --no-install-package torch --no-install-package torchaudio
 if ($LASTEXITCODE -ne 0) { Write-Host "Dependency install failed" -ForegroundColor Red; exit 1 }
 
+if (Test-Path (Join-Path $Root "repair_torch_metadata.ps1")) {
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Root "repair_torch_metadata.ps1") -PythonExe $Py
+}
+
+Install-CrispAsrNativeRuntime -PythonExe $Py -UseCuda ($Index -notlike "*cpu*")
+
+& $Uv pip install --python $Py "sherpa-onnx>=1.13.3" "sherpa-onnx-bin>=1.13.3"
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "sherpa-onnx install failed; sherpa-onnx ASR will be unavailable until installed manually" -ForegroundColor Yellow
+}
+
 & $Uv pip install --python $Py funasr --no-deps
-& $Uv pip install --python $Py pysbd
 
 Write-Host "Setup complete." -ForegroundColor Green
 '@

@@ -831,6 +831,18 @@ class DragHandle(QWidget):
             self._source_lang.setCurrentIndex(idx)
             self._source_lang.blockSignals(False)
 
+    def set_click_through_checked(self, value: bool):
+        self._ct_check.setChecked(value)
+
+    def set_topmost_checked(self, value: bool):
+        self._topmost_check.setChecked(value)
+
+    def set_auto_scroll_checked(self, value: bool):
+        self._auto_scroll.setChecked(value)
+
+    def set_taskbar_checked(self, value: bool):
+        self._taskbar_check.setChecked(value)
+
     def set_models(self, models: list, active_index: int = 0):
         self._model_combo.blockSignals(True)
         self._model_combo.clear()
@@ -895,6 +907,10 @@ class SubtitleOverlay(QWidget):
     target_language_changed = pyqtSignal(str)
     source_language_changed = pyqtSignal(str)
     model_switch_requested = pyqtSignal(int)
+    click_through_toggled = pyqtSignal(bool)
+    topmost_toggled = pyqtSignal(bool)
+    auto_scroll_toggled = pyqtSignal(bool)
+    taskbar_toggled = pyqtSignal(bool)
     start_requested = pyqtSignal()
     stop_requested = pyqtSignal()
     hide_requested = pyqtSignal()
@@ -965,6 +981,10 @@ class SubtitleOverlay(QWidget):
         self._handle.click_through_toggled.connect(self._set_click_through)
         self._handle.topmost_toggled.connect(self._set_topmost)
         self._handle.taskbar_toggled.connect(self._set_taskbar)
+        self._handle.click_through_toggled.connect(self.click_through_toggled.emit)
+        self._handle.topmost_toggled.connect(self.topmost_toggled.emit)
+        self._handle.auto_scroll_toggled.connect(self.auto_scroll_toggled.emit)
+        self._handle.taskbar_toggled.connect(self.taskbar_toggled.emit)
         self._handle.target_language_changed.connect(self.target_language_changed.emit)
         self._handle.source_language_changed.connect(self.source_language_changed.emit)
         self._handle.model_changed.connect(self.model_switch_requested.emit)
@@ -1042,6 +1062,18 @@ class SubtitleOverlay(QWidget):
 
     def set_running(self, running: bool):
         self._handle.set_running(running)
+
+    def set_click_through_checked(self, value: bool):
+        self._handle.set_click_through_checked(value)
+
+    def set_topmost_checked(self, value: bool):
+        self._handle.set_topmost_checked(value)
+
+    def set_auto_scroll_checked(self, value: bool):
+        self._handle.set_auto_scroll_checked(value)
+
+    def set_taskbar_checked(self, value: bool):
+        self._handle.set_taskbar_checked(value)
 
     def _set_topmost(self, enabled: bool):
         flags = self.windowFlags()

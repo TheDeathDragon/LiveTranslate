@@ -21,13 +21,13 @@ Works with any system audio — videos, livestreams, voice chat. No player modif
 ## Features
 
 - **Real-time pipeline**: System audio → VAD → ASR → LLM translation → overlay
-- **Multiple ASR engines**: faster-whisper, SenseVoice, FunASR Nano, Anime-Whisper
+- **Multiple ASR engines**: faster-whisper, SenseVoice, FunASR Nano, Anime-Whisper, CrispASR, sherpa-onnx, parakeet.cpp, Remote Whisper
 - **Remote ASR**: offload speech recognition to a GPU machine over HTTP — see [REMOTE_ASR.md](REMOTE_ASR.md)
 - **Any OpenAI-compatible API**: DeepSeek, Grok, Qwen, GPT, Ollama, vLLM, etc.
 - **Streaming translation display**: Real-time character-by-character translation output
 - **Per-model settings**: Streaming, structured output (JSON), context history, disable thinking
 - **Microphone mix-in**: Optionally mix microphone input with system audio for ASR
-- **Low-latency VAD**: 32ms chunks + Silero VAD with adaptive silence detection
+- **Low-latency VAD**: 32ms chunks + Silero VAD or optional FireRedVAD with adaptive silence detection
 - **Transparent overlay**: Always-on-top, click-through, draggable, 14 color themes
 - **CUDA acceleration**: GPU-accelerated ASR inference
 - **Auto model management**: Setup wizard, ModelScope / HuggingFace dual sources
@@ -71,23 +71,25 @@ To update, double-click **`update.bat`** — it will pull the latest code and up
 <summary>Manual install</summary>
 
 ```bash
-python -m venv .venv
+uv venv --python 3.12 .venv
 .venv\Scripts\activate
 
 # PyTorch (choose one)
-pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu126  # CUDA
-pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu128  # CUDA (RTX 50xx)
-pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu    # CPU only
+uv pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu126  # CUDA
+uv pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu128  # CUDA (RTX 50xx)
+uv pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu    # CPU only
 
 # Dependencies
-pip install -r requirements.txt
-pip install funasr --no-deps
+uv sync --locked --inexact --no-install-package torch --no-install-package torchaudio
+uv pip install funasr --no-deps
+uv pip install "sherpa-onnx>=1.13.3" "sherpa-onnx-bin>=1.13.3"
 
 # Launch
 .venv\Scripts\python.exe main.py
 ```
 
-> FunASR uses `--no-deps` because `editdistance` requires a C++ compiler. `editdistance-s` in `requirements.txt` is a pure-Python drop-in replacement.
+> FunASR uses `--no-deps` because `editdistance` requires a C++ compiler. `editdistance-s` in `pyproject.toml` is a pure-Python drop-in replacement.
+> `uv sync` installs the optional FireRedVAD Python package; its model is downloaded separately only if you choose to use that VAD backend.
 
 </details>
 
@@ -96,6 +98,55 @@ pip install funasr --no-deps
 1. Setup wizard appears — choose download source (ModelScope / HuggingFace) and cache path
 2. Silero VAD + SenseVoice models download automatically (~1GB)
 3. Main UI appears when ready
+
+## FireRedVAD Models
+
+FireRedVAD is optional and is not downloaded during first launch. To use it, download the official model under `models/FireRedVAD`:
+
+```powershell
+modelscope download --model xukaituo/FireRedVAD --local_dir ./models/FireRedVAD
+# or
+huggingface-cli download FireRedTeam/FireRedVAD --local-dir ./models/FireRedVAD
+```
+
+Make sure these files exist:
+
+```text
+models/FireRedVAD/Stream-VAD/cmvn.ark
+models/FireRedVAD/Stream-VAD/model.pth.tar
+```
+
+Then open Settings → VAD/ASR, choose `FireRedVAD`, click Refresh, and select the local Stream-VAD model. The first integration uses FireRedVAD only as a streaming speech-confidence backend; LiveTranslate still owns segmentation, silence handling, backtrack splitting, incremental ASR, and ASR queueing. FireRed AED is not connected.
+
+## sherpa-onnx Models
+
+LiveTranslate supports sherpa-onnx local ONNX models through Python `OfflineRecognizer` and `OnlineRecognizer` APIs. Online models are currently decoded as a VAD-segment wrapper, not as true partial streaming ASR. `install.ps1` installs the CPU wheel by default. CUDA requires replacing it with a CUDA wheel, for example:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File install.ps1 -SherpaOnnxRuntime cuda12
+```
+
+Download sherpa-onnx ASR model archives from the official sherpa-onnx releases, extract them anywhere under `models/`, then open Settings → VAD/ASR, choose `sherpa-onnx (ONNX)`, click Refresh, and select the local model directory. Online transducer scans accept `encoder.onnx`/`decoder.onnx`/`joiner.onnx` and int8 variants such as `encoder.int8.onnx`/`decoder.int8.onnx`/`joiner.int8.onnx`. PR #3671 Nemotron packages are published with names like `sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-560ms-int8-2026-06-11`; unofficial snapshots must still have ONNX files accepted by the installed sherpa-onnx/ONNX Runtime version. The `onnx-community/nemotron-3.5-asr-streaming-0.6b-onnx-int4` layout is not treated as a sherpa-onnx model in this path.
+
+## parakeet.cpp Models
+
+parakeet.cpp is optional and is not downloaded during first launch. It uses local GGUF models plus a native parakeet.cpp runtime. The first integration uses LiveTranslate's existing VAD segments and ASR worker process; parakeet.cpp streaming EOU is not connected yet.
+
+Optional installer commands:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File install.ps1 -InstallParakeetCpp -ParakeetCppBackend cpu
+powershell -ExecutionPolicy Bypass -File install.ps1 -DownloadParakeetCppModel -ParakeetCppModel tdt_ctc-110m-q4_k
+```
+
+Manual layout:
+
+```text
+models/parakeet.cpp/runtime/v0.3.2/<cpu|cuda|vulkan>/
+models/parakeet.cpp/models/tdt_ctc-110m-q4_k.gguf
+```
+
+Then open Settings → VAD/ASR, choose `parakeet.cpp (GGUF)`, click Refresh for both model and runtime, and select them. CUDA runtime may require the matching `cudart-parakeet-bin-win-cuda-x64.zip` asset next to the runtime DLLs.
 
 ## Translation API
 
@@ -108,22 +159,28 @@ Settings → Translation tab:
 | Model | `deepseek-chat` |
 | Proxy | `none` / `system` / custom URL |
 
+Real API keys are stored in `user_settings.json`, which is git-ignored. Keep `config.yaml` free of real credentials.
+
 ## Architecture
 
 ```
-Audio (WASAPI 32ms) → VAD (Silero) → ASR → LLM Translation → Overlay
+Audio (WASAPI 32ms) → VAD (Silero / FireRedVAD / Energy) → ASR → LLM Translation → Overlay
          ↑ optional mic mix-in
 ```
 
 ```
 main.py                 Entry point & pipeline
 ├── audio_capture.py    WASAPI loopback + mic mix-in
-├── vad_processor.py    Silero VAD
+├── vad_processor.py    VAD state machine (Silero / FireRedVAD / energy / disabled)
+├── vad_firered.py      FireRedVAD streaming frame adapter
 ├── asr_engine.py       faster-whisper backend
 ├── asr_funasr.py       Unified FunASR model selector backend
 ├── asr_sensevoice.py   SenseVoice backend
 ├── asr_funasr_nano.py  FunASR Nano backend
 ├── asr_anime_whisper.py Anime-Whisper backend (ja anime/galgame)
+├── asr_crispasr.py     CrispASR ggml runtime backend
+├── asr_sherpa_onnx.py  sherpa-onnx OfflineRecognizer/OnlineRecognizer backend
+├── asr_parakeet_cpp.py parakeet.cpp C API GGUF backend
 ├── asr_remote.py        Remote Whisper client (→ asr_server.py, see REMOTE_ASR.md)
 ├── translator.py       OpenAI-compatible client (streaming, JSON schema, context)
 ├── model_manager.py    Model download & cache
@@ -138,7 +195,11 @@ main.py                 Entry point & pipeline
 - [faster-whisper](https://github.com/SYSTRAN/faster-whisper) — Whisper inference via CTranslate2
 - [FunASR](https://github.com/modelscope/FunASR) — SenseVoice / Fun-ASR-Nano
 - [Anime-Whisper](https://huggingface.co/litagin/anime-whisper) — Japanese anime/galgame ASR
+- CrispASR — ggml C++ ASR runtime hub with GGUF/bin single-file models, used through its Python binding in the ASR worker
+- [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) — ONNX ASR runtime used through `OfflineRecognizer` and segment-wrapped `OnlineRecognizer`
+- [parakeet.cpp](https://github.com/mudler/parakeet.cpp) — NVIDIA NeMo Parakeet GGUF inference through the C API in the ASR worker
 - [Silero VAD](https://github.com/snakers4/silero-vad) — Voice activity detection
+- [FireRedVAD](https://github.com/FireRedTeam/FireRedVAD) — Optional streaming VAD confidence backend
 
 ## Star History
 

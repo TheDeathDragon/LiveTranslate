@@ -1,6 +1,27 @@
 # LiveTranslate - One-click installer
 # Usage: Double-click install.bat (or run: powershell -ExecutionPolicy Bypass -File install.ps1)
 
+param(
+    [ValidateSet("cpu", "cuda11", "cuda12")]
+    [string]$SherpaOnnxRuntime = "cpu",
+
+    [switch]$DownloadFireRedVAD,
+
+    [ValidateSet("ms", "hf")]
+    [string]$FireRedVADHub = "ms",
+
+    [switch]$InstallParakeetCpp,
+
+    [ValidateSet("cpu", "cuda", "vulkan")]
+    [string]$ParakeetCppBackend = "cpu",
+
+    [string]$ParakeetCppVersion = "v0.3.2",
+
+    [switch]$DownloadParakeetCppModel,
+
+    [string]$ParakeetCppModel = "tdt_ctc-110m-q4_k"
+)
+
 $ErrorActionPreference = "Stop"
 $ProjectDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $ProjectDir
@@ -9,6 +30,210 @@ function Write-Step { param($msg) Write-Host "`n[$((Get-Date).ToString('HH:mm:ss
 function Write-Ok   { param($msg) Write-Host "  OK: $msg" -ForegroundColor Green }
 function Write-Warn { param($msg) Write-Host "  WARN: $msg" -ForegroundColor Yellow }
 function Write-Err  { param($msg) Write-Host "  ERROR: $msg" -ForegroundColor Red }
+
+$CrispAsrVersion = "v0.7.2"
+$Uv = "uv"
+
+function Install-CrispAsrNativeRuntime {
+    param(
+        [string]$PythonExe,
+        [bool]$UseCuda
+    )
+
+    Write-Step "Installing CrispASR native runtime..."
+    try {
+        $target = & $PythonExe -c "import crispasr, pathlib; print(pathlib.Path(crispasr.__file__).resolve().parent)"
+        if ($LASTEXITCODE -ne 0 -or -not $target) {
+            throw "Could not locate the installed crispasr package"
+        }
+        $target = $target.Trim()
+        if (-not (Test-Path $target)) {
+            throw "Python package 'crispasr' is not installed"
+        }
+
+        $variant = if ($UseCuda) { "cuda" } else { "cpu" }
+        $asset = if ($UseCuda) {
+            "libcrispasr-windows-x86_64-cuda.tar.gz"
+        } else {
+            "libcrispasr-windows-x86_64.tar.gz"
+        }
+        $url = "https://github.com/CrispStrobe/CrispASR/releases/download/$CrispAsrVersion/$asset"
+        $tmpDir = Join-Path $env:TEMP "livetranslate-crispasr-$variant"
+        $archive = Join-Path $tmpDir $asset
+        if (Test-Path $tmpDir) { Remove-Item -Recurse -Force $tmpDir }
+        New-Item -ItemType Directory -Force -Path $tmpDir | Out-Null
+
+        Write-Host "  Downloading $asset" -ForegroundColor Gray
+        Invoke-WebRequest -Uri $url -OutFile $archive
+        & tar -xzf $archive -C $tmpDir
+        if ($LASTEXITCODE -ne 0) { throw "Failed to extract $asset" }
+
+        $root = Get-ChildItem -Path $tmpDir -Directory | Select-Object -First 1
+        if (-not $root) { throw "Extracted CrispASR runtime directory not found" }
+        $bin = Join-Path $root.FullName "bin"
+        if (-not (Test-Path (Join-Path $bin "crispasr.dll"))) {
+            throw "crispasr.dll not found in $asset"
+        }
+
+        Copy-Item -Path (Join-Path $bin "*.dll") -Destination $target -Force
+        Write-Ok "CrispASR native runtime installed ($variant)"
+    } catch {
+        if ($UseCuda) {
+            Write-Warn "CUDA CrispASR runtime failed: $($_.Exception.Message)"
+            Install-CrispAsrNativeRuntime -PythonExe $PythonExe -UseCuda $false
+        } else {
+            Write-Warn "CrispASR native runtime installation failed: $($_.Exception.Message)"
+            Write-Warn "CrispASR will not run until libcrispasr/crispasr.dll is installed"
+        }
+    }
+}
+
+function Install-SherpaOnnxRuntime {
+    param(
+        [string]$PythonExe,
+        [string]$Runtime
+    )
+
+    Write-Step "Installing sherpa-onnx runtime ($Runtime)..."
+    try {
+        if ($Runtime -eq "cpu") {
+            & $Uv pip install --python $PythonExe "sherpa-onnx>=1.13.3" "sherpa-onnx-bin>=1.13.3"
+        } else {
+            & $Uv pip uninstall --python $PythonExe sherpa-onnx sherpa-onnx-bin sherpa-onnx-core
+            if ($Runtime -eq "cuda11") {
+                & $Uv pip install --python $PythonExe --verbose sherpa-onnx=="1.13.3+cuda" --no-index -f https://k2-fsa.github.io/sherpa/onnx/cuda.html
+            } elseif ($Runtime -eq "cuda12") {
+                & $Uv pip install --python $PythonExe --verbose sherpa-onnx=="1.13.3+cuda12.cudnn9" -f https://k2-fsa.github.io/sherpa/onnx/cuda.html
+            }
+        }
+        if ($LASTEXITCODE -ne 0) { throw "sherpa-onnx install command failed" }
+        Write-Ok "sherpa-onnx runtime installed ($Runtime)"
+    } catch {
+        Write-Warn "sherpa-onnx runtime installation failed: $($_.Exception.Message)"
+        Write-Warn "sherpa-onnx ASR will not run until the Python package is installed"
+    }
+}
+
+function Test-FireRedVadPackage {
+    param([string]$PythonExe)
+
+    Write-Step "Checking FireRedVAD Python package..."
+    try {
+        $version = & $PythonExe -c "import importlib.metadata as m; import fireredvad; print(m.version('fireredvad'))" 2>&1
+        if ($LASTEXITCODE -ne 0) { throw $version }
+        Write-Ok "fireredvad $($version.Trim())"
+    } catch {
+        Write-Warn "FireRedVAD package check failed: $($_.Exception.Message)"
+        Write-Warn "FireRedVAD VAD mode will be unavailable until fireredvad is installed"
+    }
+}
+
+function Download-FireRedVADModel {
+    param(
+        [string]$PythonExe,
+        [string]$Hub
+    )
+
+    Write-Step "Downloading FireRedVAD Stream-VAD model..."
+    $target = Join-Path $ProjectDir "models\FireRedVAD"
+    New-Item -ItemType Directory -Force -Path $target | Out-Null
+    try {
+        if ($Hub -eq "ms") {
+            Write-Host "  Source: ModelScope xukaituo/FireRedVAD" -ForegroundColor Gray
+            & $PythonExe -c "from modelscope import snapshot_download; snapshot_download(model_id='xukaituo/FireRedVAD', local_dir=r'models/FireRedVAD')"
+        } else {
+            Write-Host "  Source: HuggingFace FireRedTeam/FireRedVAD" -ForegroundColor Gray
+            & $PythonExe -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='FireRedTeam/FireRedVAD', local_dir=r'models/FireRedVAD')"
+        }
+        if ($LASTEXITCODE -ne 0) { throw "FireRedVAD model download command failed" }
+
+        $cmvn = Join-Path $target "Stream-VAD\cmvn.ark"
+        $model = Join-Path $target "Stream-VAD\model.pth.tar"
+        if (-not (Test-Path $cmvn) -or -not (Test-Path $model)) {
+            throw "Downloaded model is missing Stream-VAD\cmvn.ark or Stream-VAD\model.pth.tar"
+        }
+        Write-Ok "FireRedVAD model ready: models\FireRedVAD\Stream-VAD"
+    } catch {
+        Write-Warn "FireRedVAD model download failed: $($_.Exception.Message)"
+        Write-Warn "You can download it later and place it under models\FireRedVAD"
+    }
+}
+
+function Install-ParakeetCppRuntime {
+    param(
+        [string]$PythonExe,
+        [string]$Backend,
+        [string]$Version
+    )
+
+    Write-Step "Installing parakeet.cpp runtime ($Backend, $Version)..."
+    $versionNoV = $Version.TrimStart("v")
+    $asset = "parakeet-$Version-lib-win-$Backend-x64.zip"
+    $url = "https://github.com/mudler/parakeet.cpp/releases/download/$Version/$asset"
+    $target = Join-Path $ProjectDir "models\parakeet.cpp\runtime\$Version\$Backend"
+    $tmpDir = Join-Path $env:TEMP "livetranslate-parakeet-$Backend"
+    $archive = Join-Path $tmpDir $asset
+    try {
+        if (Test-Path $tmpDir) { Remove-Item -Recurse -Force $tmpDir }
+        New-Item -ItemType Directory -Force -Path $tmpDir | Out-Null
+        New-Item -ItemType Directory -Force -Path $target | Out-Null
+
+        Write-Host "  Downloading $asset" -ForegroundColor Gray
+        Invoke-WebRequest -Uri $url -OutFile $archive
+        Expand-Archive -Path $archive -DestinationPath $tmpDir -Force
+
+        $dll = Get-ChildItem -Path $tmpDir -Recurse -Filter "*.dll" |
+            Where-Object { $_.Name -in @("parakeet.dll", "libparakeet.dll", "parakeet_capi.dll", "libparakeet_capi.dll") } |
+            Select-Object -First 1
+        if (-not $dll) {
+            throw "parakeet C API DLL not found in $asset"
+        }
+
+        Copy-Item -Path (Join-Path $tmpDir "*") -Destination $target -Recurse -Force
+
+        if ($Backend -eq "cuda") {
+            $cudartAsset = "cudart-parakeet-bin-win-cuda-x64.zip"
+            $cudartUrl = "https://github.com/mudler/parakeet.cpp/releases/download/$Version/$cudartAsset"
+            $cudartArchive = Join-Path $tmpDir $cudartAsset
+            Write-Host "  Downloading $cudartAsset" -ForegroundColor Gray
+            Invoke-WebRequest -Uri $cudartUrl -OutFile $cudartArchive
+            Expand-Archive -Path $cudartArchive -DestinationPath $target -Force
+        }
+
+        $test = & $PythonExe -c "import ctypes, pathlib; root=pathlib.Path(r'$target'); names=('parakeet.dll','libparakeet.dll','parakeet_capi.dll','libparakeet_capi.dll'); dll=next((p for n in names for p in root.rglob(n)), None); assert dll, 'DLL not found'; lib=ctypes.CDLL(str(dll)); lib.parakeet_capi_abi_version.restype=ctypes.c_int; print(lib.parakeet_capi_abi_version())" 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw "Runtime smoke test failed: $test"
+        }
+        Write-Ok "parakeet.cpp runtime ready: models\parakeet.cpp\runtime\$Version\$Backend (ABI $($test.Trim()))"
+    } catch {
+        Write-Warn "parakeet.cpp runtime installation failed: $($_.Exception.Message)"
+        Write-Warn "You can manually extract $asset to models\parakeet.cpp\runtime\$Version\$Backend"
+    }
+}
+
+function Download-ParakeetCppModel {
+    param(
+        [string]$PythonExe,
+        [string]$ModelName
+    )
+
+    Write-Step "Downloading parakeet.cpp GGUF model ($ModelName)..."
+    $target = Join-Path $ProjectDir "models\parakeet.cpp\models"
+    New-Item -ItemType Directory -Force -Path $target | Out-Null
+    $fileName = if ($ModelName.EndsWith(".gguf")) { $ModelName } else { "$ModelName.gguf" }
+    try {
+        & $PythonExe -c "from huggingface_hub import hf_hub_download; hf_hub_download(repo_id='mudler/parakeet-cpp-gguf', filename=r'$fileName', local_dir=r'models/parakeet.cpp/models')"
+        if ($LASTEXITCODE -ne 0) { throw "HuggingFace model download command failed" }
+        $modelPath = Join-Path $target $fileName
+        if (-not (Test-Path $modelPath)) {
+            throw "Downloaded model file not found: $modelPath"
+        }
+        Write-Ok "parakeet.cpp model ready: models\parakeet.cpp\models\$fileName"
+    } catch {
+        Write-Warn "parakeet.cpp model download failed: $($_.Exception.Message)"
+        Write-Warn "Download a GGUF from mudler/parakeet-cpp-gguf and place it under models\parakeet.cpp\models"
+    }
+}
 
 function Enable-SystemProxy {
     # uv (Python download) and pip honor *_PROXY env vars but not the Windows
@@ -51,6 +276,52 @@ Write-Host "========================================" -ForegroundColor Magenta
 
 Enable-SystemProxy
 
+# ── Step 0: Find uv ──
+Write-Step "Detecting uv..."
+try {
+    $uvVersion = & $Uv --version 2>&1
+    if ($LASTEXITCODE -ne 0) { throw $uvVersion }
+    Write-Ok $uvVersion
+} catch {
+    Write-Warn "uv not found"
+    $hasWinget = $false
+    try {
+        $null = & winget --version 2>&1
+        if ($LASTEXITCODE -eq 0) { $hasWinget = $true }
+    } catch {}
+
+    if ($hasWinget) {
+        Write-Host ""
+        Write-Host "  uv can be installed automatically via winget." -ForegroundColor White
+        $answer = Read-Host "  Install uv now? [Y/n]"
+        if ($answer -eq "" -or $answer -match "^[Yy]") {
+            Write-Step "Installing uv via winget..."
+            & winget install Astral.UV --accept-package-agreements --accept-source-agreements
+            if ($LASTEXITCODE -ne 0) {
+                Write-Err "winget install failed"
+                Read-Host "Press Enter to exit"
+                exit 1
+            }
+            $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
+            $uvVersion = & $Uv --version 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                Write-Err "uv installed but not found in PATH. Please close this window, reopen, and run install.bat again."
+                Read-Host "Press Enter to exit"
+                exit 1
+            }
+            Write-Ok $uvVersion
+        } else {
+            Write-Err "uv is required. Install it from https://docs.astral.sh/uv/getting-started/installation/ and run install.bat again."
+            Read-Host "Press Enter to exit"
+            exit 1
+        }
+    } else {
+        Write-Err "uv is required and winget is not available. Install uv from https://docs.astral.sh/uv/getting-started/installation/"
+        Read-Host "Press Enter to exit"
+        exit 1
+    }
+}
+
 # ── Step 1: Find Python ──
 Write-Step "Detecting Python..."
 
@@ -63,6 +334,19 @@ function Find-Python {
                 $exe = $exe.Trim()
                 $ver = & $exe --version 2>&1
                 Write-Ok "Found $ver ($exe)"
+                return $exe
+            }
+        } catch {}
+    }
+    # uv-managed Python is project-local and should count as available when it
+    # has already been downloaded. Do not download during detection.
+    foreach ($v in @("3.12", "3.11", "3.10")) {
+        try {
+            $exe = & $Uv python find $v --managed-python --no-python-downloads 2>&1
+            if ($LASTEXITCODE -eq 0 -and $exe -and (Test-Path $exe.Trim())) {
+                $exe = $exe.Trim()
+                $ver = & $exe --version 2>&1
+                Write-Ok "Found uv-managed $ver ($exe)"
                 return $exe
             }
         } catch {}
@@ -162,7 +446,7 @@ if (Test-Path ".venv") {
     } else {
         Write-Warn "Existing venv is broken or incomplete, recreating..."
         Remove-Item -Recurse -Force .venv -ErrorAction SilentlyContinue
-        & $PythonCmd -m venv .venv
+        & $Uv venv --python $PythonCmd .venv
         if ($LASTEXITCODE -ne 0) {
             Write-Err "Failed to create venv"
             Read-Host "Press Enter to exit"
@@ -171,7 +455,7 @@ if (Test-Path ".venv") {
         Write-Ok "Created .venv"
     }
 } else {
-    & $PythonCmd -m venv .venv
+    & $Uv venv --python $PythonCmd .venv
     if ($LASTEXITCODE -ne 0) {
         Write-Err "Failed to create venv"
         Read-Host "Press Enter to exit"
@@ -180,17 +464,7 @@ if (Test-Path ".venv") {
     Write-Ok "Created .venv"
 }
 
-$Pip = ".venv\Scripts\pip.exe"
 $Python = ".venv\Scripts\python.exe"
-
-# Upgrade pip first
-Write-Step "Upgrading pip..."
-& $Python -m pip install --upgrade pip --quiet
-if ($LASTEXITCODE -ne 0) {
-    Write-Warn "pip upgrade failed (non-critical, continuing with current pip)"
-} else {
-    Write-Ok "pip upgraded"
-}
 
 # ── Step 3: Detect GPU ──
 Write-Step "Detecting GPU..."
@@ -242,9 +516,9 @@ Write-Step "Installing PyTorch (this may take a few minutes)..."
 
 if ($HasNvidia) {
     Write-Host "  Using index: $CudaVer" -ForegroundColor Gray
-    & $Pip install torch torchaudio --index-url https://download.pytorch.org/whl/$CudaVer
+    & $Uv pip install --python $Python torch torchaudio --index-url https://download.pytorch.org/whl/$CudaVer
 } else {
-    & $Pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+    & $Uv pip install --python $Python torch torchaudio --index-url https://download.pytorch.org/whl/cpu
 }
 
 if ($LASTEXITCODE -ne 0) {
@@ -255,34 +529,53 @@ if ($LASTEXITCODE -ne 0) {
 Write-Ok "PyTorch installed"
 
 # ── Step 5: Install dependencies ──
-Write-Step "Installing dependencies from requirements.txt..."
+Write-Step "Syncing dependencies with uv..."
 
-& $Pip install -r requirements.txt
+& $Uv sync --python $Python --locked --inexact --no-install-package torch --no-install-package torchaudio
 if ($LASTEXITCODE -ne 0) {
-    Write-Err "Failed to install dependencies"
+    Write-Err "Failed to sync dependencies"
     Read-Host "Press Enter to exit"
     exit 1
 }
-Write-Ok "Dependencies installed"
+Write-Ok "Dependencies synced"
 
-# ── Step 6: Install FunASR (no-deps) ──
+# uv sync intentionally skips torch/torchaudio because the correct wheel index
+# depends on GPU support. Clean up stale torch metadata if a previous sync/install
+# left duplicate dist-info directories behind.
+if (Test-Path ".\repair_torch_metadata.ps1") {
+    & powershell -NoProfile -ExecutionPolicy Bypass -File ".\repair_torch_metadata.ps1" -PythonExe $Python
+}
+
+# ── Step 6: Verify FireRedVAD dependency ──
+Test-FireRedVadPackage -PythonExe $Python
+
+if ($DownloadFireRedVAD) {
+    Download-FireRedVADModel -PythonExe $Python -Hub $FireRedVADHub
+}
+
+# ── Step 7: Install CrispASR native runtime ──
+Install-CrispAsrNativeRuntime -PythonExe $Python -UseCuda $HasNvidia
+
+# ── Step 8: Install sherpa-onnx runtime ──
+Install-SherpaOnnxRuntime -PythonExe $Python -Runtime $SherpaOnnxRuntime
+
+# ── Step 9: Install FunASR (no-deps) ──
 Write-Step "Installing FunASR (--no-deps)..."
 
-& $Pip install funasr --no-deps
+& $Uv pip install --python $Python funasr --no-deps
 if ($LASTEXITCODE -ne 0) {
     Write-Warn "FunASR installation failed (non-critical, SenseVoice engine may not work)"
 } else {
     Write-Ok "FunASR installed"
 }
 
-# ── Step 7: Install pysbd for incremental ASR ──
-Write-Step "Installing pysbd..."
+# ── Step 10: Optional parakeet.cpp runtime/model ──
+if ($InstallParakeetCpp) {
+    Install-ParakeetCppRuntime -PythonExe $Python -Backend $ParakeetCppBackend -Version $ParakeetCppVersion
+}
 
-& $Pip install pysbd
-if ($LASTEXITCODE -ne 0) {
-    Write-Warn "pysbd installation failed (incremental ASR may not work)"
-} else {
-    Write-Ok "pysbd installed"
+if ($DownloadParakeetCppModel) {
+    Download-ParakeetCppModel -PythonExe $Python -ModelName $ParakeetCppModel
 }
 
 # ── Done ──

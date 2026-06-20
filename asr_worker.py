@@ -1,7 +1,10 @@
 import gc
+import importlib.metadata
 import inspect
 import logging
+import os
 import sys
+import sysconfig
 import traceback
 from typing import Any
 
@@ -51,6 +54,81 @@ def _parse_device(device: str) -> tuple[str, int]:
     return device, 0
 
 
+def _sherpa_onnx_cuda_wheel_available() -> bool:
+    try:
+        version = importlib.metadata.version("sherpa-onnx")
+    except importlib.metadata.PackageNotFoundError:
+        return False
+    return "+cuda" in version.lower()
+
+
+def _resolve_sherpa_onnx_provider(provider: str, parsed_device: str) -> str:
+    provider = str(provider or "auto").lower()
+    if provider == "auto":
+        return (
+            "cuda"
+            if parsed_device == "cuda" and _sherpa_onnx_cuda_wheel_available()
+            else "cpu"
+        )
+    if provider == "cuda" and not _sherpa_onnx_cuda_wheel_available():
+        raise RuntimeError(
+            "sherpa-onnx CUDA provider selected, but the installed package is "
+            "not a CUDA wheel. Install the CUDA sherpa-onnx wheel or select CPU."
+        )
+    if provider not in ("cpu", "cuda"):
+        raise ValueError(f"Unsupported sherpa-onnx provider: {provider}")
+    return provider
+
+
+def _is_sherpa_onnx_cuda_load_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return (
+        "executionprovider_cuda" in message
+        or "onnxruntime_providers_cuda" in message
+        or "cublas" in message
+        or "cudnn" in message
+        or "failed to load shared library" in message
+    )
+
+
+def _prepend_process_path(path: str) -> bool:
+    if not path or not os.path.isdir(path):
+        return False
+    current = os.environ.get("PATH", "")
+    parts = [p for p in current.split(os.pathsep) if p]
+    normalized = {os.path.normcase(os.path.abspath(p)) for p in parts}
+    target = os.path.normcase(os.path.abspath(path))
+    if target in normalized:
+        return False
+    os.environ["PATH"] = path + (os.pathsep + current if current else "")
+    return True
+
+
+def _prepare_sherpa_onnx_cuda_runtime():
+    site_roots = []
+    for key in ("purelib", "platlib"):
+        path = sysconfig.get_paths().get(key)
+        if path and path not in site_roots:
+            site_roots.append(path)
+
+    added = []
+    for root in site_roots:
+        for relative in (
+            os.path.join("torch", "lib"),
+            "crispasr",
+            "ctranslate2",
+        ):
+            candidate = os.path.join(root, relative)
+            if _prepend_process_path(candidate):
+                added.append(candidate)
+
+    if added:
+        log.info(
+            "sherpa-onnx CUDA DLL search path updated: "
+            + "; ".join(added)
+        )
+
+
 def _load_engine(config: dict):
     from model_manager import MODELS_DIR, apply_cache_env
 
@@ -78,6 +156,79 @@ def _load_engine(config: dict):
 
         worker_device = parsed_device if parsed_device == "cpu" else f"cuda:{device_index}"
         engine = AnimeWhisperEngine(device=worker_device, hub=hub)
+    elif engine_type == "crispasr":
+        from asr_crispasr import CrispASREngine
+
+        gpu_backend = config.get("crispasr_gpu_backend", "auto")
+        if parsed_device == "cpu":
+            gpu_backend = "cpu"
+        elif gpu_backend == "auto" and parsed_device.startswith("cuda"):
+            gpu_backend = "cuda"
+        device_index = int(config.get("crispasr_device_index", device_index))
+        os_env_device = str(device_index)
+        os.environ["CRISPASR_ARG_DEVICE"] = os_env_device
+        if config.get("crispasr_unified_memory", True):
+            os.environ["GGML_CUDA_ENABLE_UNIFIED_MEMORY"] = "1"
+        engine = CrispASREngine(
+            model_path=config["crispasr_model_path"],
+            backend=config.get("crispasr_backend", "auto"),
+            gpu_backend=gpu_backend,
+            device_index=device_index,
+            language=language,
+            punc_model=config.get("crispasr_punc_model", "auto"),
+            unified_memory=config.get("crispasr_unified_memory", True),
+        )
+    elif engine_type == "sherpa-onnx":
+        requested_provider = str(config.get("sherpa_onnx_provider", "auto")).lower()
+        provider = _resolve_sherpa_onnx_provider(
+            requested_provider, parsed_device
+        )
+        if provider == "cuda":
+            os.environ["CUDA_VISIBLE_DEVICES"] = str(device_index)
+            _prepare_sherpa_onnx_cuda_runtime()
+
+        from asr_sherpa_onnx import SherpaOnnxEngine
+
+        kwargs = {
+            "model_path": config["sherpa_onnx_model_path"],
+            "model_info": config["sherpa_onnx_model_info"],
+            "num_threads": int(config.get("sherpa_onnx_num_threads", 2)),
+            "language": language,
+            "decoding_method": config.get("sherpa_onnx_decoding_method", "greedy_search"),
+            "left_padding_seconds": float(
+                config.get("sherpa_onnx_left_padding_seconds", 0.3)
+            ),
+            "tail_padding_seconds": float(
+                config.get("sherpa_onnx_tail_padding_seconds", 0.5)
+            ),
+        }
+        try:
+            engine = SherpaOnnxEngine(provider=provider, **kwargs)
+        except RuntimeError as exc:
+            if (
+                requested_provider == "auto"
+                and provider == "cuda"
+                and _is_sherpa_onnx_cuda_load_error(exc)
+            ):
+                log.warning(
+                    "sherpa-onnx CUDA provider failed to load; falling back to CPU. "
+                    f"Reason: {exc}"
+                )
+                engine = SherpaOnnxEngine(provider="cpu", **kwargs)
+            else:
+                raise
+    elif engine_type == "parakeet-cpp":
+        from asr_parakeet_cpp import ParakeetCppEngine
+
+        engine = ParakeetCppEngine(
+            model_path=config["parakeet_cpp_model_path"],
+            runtime_dir=config["parakeet_cpp_runtime_dir"],
+            backend=config.get("parakeet_cpp_backend", "auto"),
+            decoder=config.get("parakeet_cpp_decoder", "auto"),
+            device=device,
+            language=language,
+            word_timestamps=config.get("parakeet_cpp_word_timestamps", True),
+        )
     else:
         from asr_engine import ASREngine
 
@@ -148,6 +299,7 @@ def worker_main(conn, config: dict):
                     "engine_type": config.get("engine_type"),
                     "display_name": config.get("display_name"),
                     "device": config.get("device"),
+                    "runtime_provider": getattr(engine, "provider", None),
                 },
             )
         )

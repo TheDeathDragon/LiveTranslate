@@ -1,10 +1,21 @@
 # Changelog
 
 ## 2026-06-20
+- New ASR engine: sherpa-onnx (ONNX OfflineRecognizer), reusing the existing VAD segmentation, ASR worker subprocess, and translation pipeline
+- Settings panel can select a local sherpa-onnx model directory, provider, and thread count; local scanning supports SenseVoice / Paraformer / Moonshine / Whisper directory layouts, plus online transducer snapshots with `encoder.onnx` / `decoder.onnx` / `joiner.onnx` / `tokens.txt`
+- sherpa-onnx online transducer models use `OnlineRecognizer` as a VAD segment wrapper in this phase; partial streaming ASR is not enabled yet
+- sherpa-onnx does not use a built-in downloader in this phase: extract official models anywhere under `models/`, then refresh and select them in settings
+- Installer now installs the CPU sherpa-onnx runtime by default, with `-SherpaOnnxRuntime cuda11/cuda12` for CUDA wheels
 - New "Remote Whisper" ASR engine: offload speech recognition to a separate GPU machine (ships `asr_server.py` server), so a box without a GPU can still transcribe in real time
 - New "WebID / ID Verify" translation prompt preset, tuned for video identity-verification calls
-- ASR now runs in an isolated subprocess: the worker auto-restarts on crash/timeout and recycles when memory grows past a threshold, so a recognition failure no longer drags down the UI
+- ASR now runs in an isolated subprocess, so recognition failures no longer drag down the UI process
 - Subtitle window mouse click-through (#28): a toggle in the subtitle settings plus a "Subtitle Click-through" tray shortcut; when on, clicks pass to the window behind (middle-click drag is disabled while on — turn it off to reposition)
+
+## 2026-06-19
+- Fix CrispASR startup failure with `No module named 'crispasr'`: added the CrispASR Python binding to `pyproject.toml`, pinned to GitHub Releases `v0.7.2`
+- Installer now downloads the prebuilt Windows `libcrispasr` DLL runtime from Releases and places it next to the installed `crispasr` package
+- NVIDIA systems prefer the CUDA CrispASR runtime and automatically fall back to the CPU runtime if download or installation fails
+- Portable first-run bootstrap now installs both the CrispASR binding and native DLLs, preventing release builds from missing `crispasr.dll`
 
 ## 2026-05-10
 - New "Export to file" menu: original / translation / combined formats, accessible from overlay right-click menu and tray menu

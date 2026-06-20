@@ -82,6 +82,20 @@ class AudioCapture:
         self._mic_restart_event = threading.Event()
         self._mic_buf = np.array([], dtype=np.float32)
 
+    @property
+    def device_name(self):
+        """Configured loopback device name. None means system default."""
+        return self._device_name
+
+    @property
+    def current_device_name(self):
+        """Actual opened loopback device name, if a stream is active."""
+        return self._current_device_name
+
+    @property
+    def is_loopback_disabled(self) -> bool:
+        return self._loopback_disabled
+
     def _get_wasapi_info(self):
         for i in range(self._pa.get_host_api_count()):
             info = self._pa.get_host_api_info_by_index(i)

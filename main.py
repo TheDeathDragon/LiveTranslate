@@ -7,29 +7,19 @@ import sys
 import signal
 import logging
 import threading
-import queue
 import gc
 from concurrent.futures import ThreadPoolExecutor
 import yaml
 import time
-import numpy as np
 from pathlib import Path
 from datetime import datetime
 
 from model_manager import (
     DEFAULT_FUNASR_MODEL,
     apply_cache_env,
-    funasr_display_name,
-    funasr_supports_padding,
     get_missing_models,
-    is_asr_cached,
-    ASR_DISPLAY_NAMES,
-    MODELS_DIR,
-    local_faster_whisper_display_name,
     migrate_funasr_settings,
     normalize_asr_engine_selection,
-    normalize_funasr_model_key,
-    resolve_custom_whisper_model,
 )
 
 # Set cache env BEFORE importing torch so TORCH_HOME is respected
@@ -40,9 +30,8 @@ import os
 # torch must be imported before PyQt6 to avoid DLL conflicts on Windows
 import torch  # noqa: F401
 
-from audio_capture import AudioCapture
-from vad_processor import VADProcessor
-from asr_client import ASRClient, ASRWorkerError, ASRWorkerExited, ASRWorkerTimeout
+from asr_service import ASRService
+from pipeline_controller import PipelineController
 from translator import Translator, RepetitionError
 from transcript_writer import TranscriptWriter
 
@@ -62,20 +51,14 @@ from PyQt6.QtCore import QTimer, Qt
 from subtitle_overlay import SubtitleOverlay
 from subtitle_window import SubtitleWindow
 from log_window import LogWindow
-from control_panel import (
-    ControlPanel,
-    SETTINGS_FILE,
-    _load_saved_settings,
-    _save_settings,
-)
+from control_panel import ControlPanel
+from settings_store import SETTINGS_FILE, load_settings, save_settings
 from dialogs import (
     SetupWizardDialog,
     ModelDownloadDialog,
     _ModelLoadDialog,
 )
 from i18n import t, set_lang, LANGUAGES, COMMON_LANG_CODES
-
-_NO_PENDING = object()
 
 
 def setup_logging():
@@ -160,53 +143,20 @@ class LiveTranslateApp:
         self._config = config
         self._running = False
         self._paused = False
-        self._asr_ready = False  # True when ASR model is loaded
 
-        self._audio = AudioCapture(
-            device=config["audio"].get("device"),
-            sample_rate=config["audio"]["sample_rate"],
-            chunk_duration=config["audio"]["chunk_duration"],
+        self._asr_service = ASRService(
+            config,
+            release_memory_caches=self._release_memory_caches,
+            unavailable_callback=self._on_asr_unavailable,
         )
-        self._vad = VADProcessor(
-            sample_rate=config["audio"]["sample_rate"],
-            threshold=config["asr"]["vad_threshold"],
-            min_speech_duration=config["asr"]["min_speech_duration"],
-            max_speech_duration=config["asr"]["max_speech_duration"],
-            chunk_duration=config["audio"]["chunk_duration"],
+        self._pipeline = PipelineController(
+            config,
+            asr_runner=self._run_asr,
+            asr_ready=lambda: self._asr_service.is_ready,
+            asr_language=self._current_asr_language,
+            audio_level_callback=self._on_audio_level,
+            asr_text_callback=self._on_asr_text,
         )
-        self._asr_type = None
-        self._asr = None
-        self._asr_signature = None
-        self._asr_config = None
-        self._asr_error_count = 0
-        self._asr_device = config["asr"]["device"]
-        self._whisper_model_size = config["asr"]["model_size"]
-        self._funasr_model_key = normalize_funasr_model_key(
-            config["asr"].get("funasr_model", DEFAULT_FUNASR_MODEL)
-        )
-        self._asr_lock = threading.RLock()
-        self._vad_lock = threading.Lock()
-        # Settings changed from the Qt thread are deferred here and applied by the
-        # ASR thread before its next transcribe, so the UI never blocks on the
-        # worker pipe (which may be busy with an in-flight cross-process call).
-        # Padding is keyed by engine_type because one settings save updates both
-        # the funasr and whisper padding and they must not clobber each other.
-        self._asr_pending_lock = threading.Lock()
-        self._asr_pending_language = _NO_PENDING
-        self._asr_pending_padding = {}
-        # Auto-restart bookkeeping for a worker that dies mid-session. _asr_generation
-        # is bumped on every (de)activation so a slow background (re)start can detect
-        # that a newer engine switch superseded it and discard its stale worker.
-        self._asr_restart_state = None
-        self._asr_restart_count = 0
-        self._asr_restart_max = 3
-        self._asr_generation = 0
-        self._asr_recycling = False
-        # Proactively recycle the worker once its RSS grows this far past the
-        # post-load baseline, to bound native-side (FunASR/CTranslate2) leaks that
-        # accumulate in the long-lived worker process.
-        self._asr_worker_baseline_mb = None
-        self._asr_recycle_delta_mb = 2048
         self._target_language = config["translation"]["target_language"]
         self._translator = Translator(
             api_base=config["translation"]["api_base"],
@@ -224,9 +174,6 @@ class LiveTranslateApp:
         self._overlay = None
         self._subwin = None
         self._panel = None
-        self._capture_thread = None
-        self._asr_thread = None
-        self._asr_queue = queue.Queue(maxsize=16)
         self._tl_executor = ThreadPoolExecutor(max_workers=8)
 
         self._transcript = TranscriptWriter(Path(__file__).parent / "transcripts")
@@ -256,15 +203,6 @@ class LiveTranslateApp:
         self._last_original = ""
         self._last_msg_id = 0
 
-        # Incremental ASR state
-        self._incremental_enabled = False
-        self._interim_interval = 2.0
-        self._interim_pending = ""
-        self._interim_active = False
-        self._last_interim_samples = 0
-        self._last_interim_check_time = 0.0
-        self._interim_committed_tail = ""
-
     def set_overlay(self, overlay: SubtitleOverlay):
         self._overlay = overlay
 
@@ -281,16 +219,30 @@ class LiveTranslateApp:
         if self._overlay:
             self._overlay.set_models(models, active_idx)
 
+    def _current_asr_language(self) -> str:
+        if self._panel:
+            return self._panel.get_settings().get("asr_language", "auto")
+        return "auto"
+
+    def _on_audio_level(self, event):
+        if self._overlay:
+            self._overlay.update_monitor(
+                event.rms, event.vad_confidence, event.mic_rms
+            )
+
+    def _on_asr_text(self, event):
+        self._handle_asr_text(event.text, event.source_lang, event.asr_ms)
+
     def _on_settings_changed(self, settings):
-        self._vad.update_settings(settings)
+        self._pipeline.apply_settings(settings)
         if "style" in settings and self._overlay:
             self._overlay.apply_style(settings["style"])
         if "asr_language" in settings:
-            self._set_asr_language(settings["asr_language"])
+            self._asr_service.set_language(settings["asr_language"])
         if "sensevoice_pad_seconds" in settings:
-            self._set_asr_padding("funasr", settings["sensevoice_pad_seconds"])
+            self._asr_service.set_padding("funasr", settings["sensevoice_pad_seconds"])
         if "whisper_pad_seconds" in settings:
-            self._set_asr_padding("whisper", settings["whisper_pad_seconds"])
+            self._asr_service.set_padding("whisper", settings["whisper_pad_seconds"])
         if any(
             key in settings
             for key in (
@@ -298,29 +250,32 @@ class LiveTranslateApp:
                 "asr_device",
                 "whisper_model_size",
                 "funasr_model",
+                "crispasr_model",
+                "crispasr_backend",
+                "crispasr_gpu_backend",
+                "crispasr_device_index",
+                "crispasr_punc_model",
+                "crispasr_unified_memory",
+                "sherpa_onnx_model",
+                "sherpa_onnx_provider",
+                "sherpa_onnx_num_threads",
+                "sherpa_onnx_decoding_method",
+                "parakeet_cpp_model",
+                "parakeet_cpp_runtime_dir",
+                "parakeet_cpp_backend",
+                "parakeet_cpp_decoder",
+                "parakeet_cpp_word_timestamps",
+                "remote_asr_url",
                 "hub",
             )
         ):
             self._switch_asr_engine(
                 settings.get(
                     "asr_engine",
-                    self._asr_type or self._config["asr"].get("asr_engine", "funasr"),
+                    self._asr_service.current_engine_type
+                    or self._config["asr"].get("asr_engine", "funasr"),
                 )
             )
-        if "audio_device" in settings:
-            old_device = self._audio._device_name
-            self._audio.set_device(settings["audio_device"])
-            if old_device != settings.get("audio_device"):
-                self._vad.flush()
-                self._vad._reset()
-                if self._overlay:
-                    self._overlay.update_monitor(0.0, 0.0)
-        if "mic_device" in settings:
-            self._audio.set_mic_device(settings["mic_device"])
-        if "incremental_asr" in settings:
-            self._incremental_enabled = settings["incremental_asr"]
-        if "interim_interval" in settings:
-            self._interim_interval = settings["interim_interval"]
         if "target_language" in settings:
             self._target_language = settings["target_language"]
             if self._overlay:
@@ -330,123 +285,9 @@ class LiveTranslateApp:
         if "auto_save_transcript" in settings:
             self._transcript.set_enabled(settings["auto_save_transcript"])
 
-    def _mark_asr_unavailable(self, reason: str, client=None):
-        with self._asr_lock:
-            current = client or self._asr
-            if client is not None and self._asr is not client:
-                return
-            self._asr_ready = False
-            self._asr = None
-            self._asr_type = None
-            self._asr_signature = None
-            self._asr_config = None
-            self._asr_error_count = 0
-            self._asr_restart_state = None
-            self._asr_worker_baseline_mb = None
-            self._asr_generation += 1
-        if current is not None:
-            try:
-                current.shutdown()
-            except Exception:
-                try:
-                    current.terminate()
-                except Exception:
-                    pass
-        log.warning(f"ASR worker unavailable: {reason}")
+    def _on_asr_unavailable(self, reason: str):
         if self._overlay:
             self._overlay.update_asr_device("ASR unavailable")
-
-    def _shutdown_asr_worker(self):
-        with self._asr_lock:
-            client = self._asr
-            self._asr = None
-            self._asr_ready = False
-            self._asr_type = None
-            self._asr_signature = None
-            self._asr_config = None
-            self._asr_error_count = 0
-            self._asr_restart_state = None
-            self._asr_worker_baseline_mb = None
-            self._asr_generation += 1
-        if client is not None:
-            log.info(f"Shutting down ASR worker: pid={client.pid}")
-            client.shutdown()
-
-    def _set_asr_language(self, language: str):
-        with self._asr_pending_lock:
-            self._asr_pending_language = language
-
-    def _set_asr_padding(self, engine_type: str, pad_seconds):
-        with self._asr_pending_lock:
-            self._asr_pending_padding[engine_type] = pad_seconds
-
-    def _apply_pending_asr_settings(self, client, asr_type, funasr_key):
-        """Apply deferred language/padding on the ASR thread, just before a transcribe.
-        A pending value is cleared only once delivered; worker-death exceptions
-        propagate with the pending intact so the restarted worker re-applies it. The
-        applied value is written back into the restart config so an auto-restart or
-        recycle does not revert a runtime override to the engine-switch-time value."""
-        with self._asr_pending_lock:
-            language = self._asr_pending_language
-            pad_seconds = self._asr_pending_padding.get(asr_type, _NO_PENDING)
-        if language is not _NO_PENDING:
-            try:
-                client.set_language(language)
-            except ASRWorkerError as exc:
-                log.warning(f"ASR language update failed: {exc}")
-            self._update_restart_config(language=language)
-            self._clear_pending_language(language)
-        if pad_seconds is not _NO_PENDING:
-            if not (asr_type == "funasr" and not funasr_supports_padding(funasr_key)):
-                try:
-                    client.set_input_padding(pad_seconds)
-                except ASRWorkerError as exc:
-                    log.warning(f"ASR padding update failed: {exc}")
-                self._update_restart_config(pad_seconds=pad_seconds)
-            self._clear_pending_padding(asr_type, pad_seconds)
-
-    def _clear_pending_language(self, language):
-        with self._asr_pending_lock:
-            if self._asr_pending_language is language:
-                self._asr_pending_language = _NO_PENDING
-
-    def _clear_pending_padding(self, asr_type, pad_seconds):
-        with self._asr_pending_lock:
-            if self._asr_pending_padding.get(asr_type) == pad_seconds:
-                del self._asr_pending_padding[asr_type]
-
-    def _update_restart_config(self, **kwargs):
-        with self._asr_lock:
-            if self._asr_restart_state and self._asr_restart_state.get("config"):
-                self._asr_restart_state["config"].update(kwargs)
-
-    def _load_engine_client(self, config: dict):
-        """Build the ASR backend for a worker config. Local engines run in an isolated
-        worker subprocess (ASRClient); remote-whisper is a thin in-process HTTP client
-        that needs no subprocess isolation (no native deps, no GPU model to load)."""
-        if config.get("engine_type") == "remote-whisper":
-            from asr_remote import RemoteASREngine
-
-            url = config.get("remote_asr_url") or "http://127.0.0.1:8765"
-            engine = RemoteASREngine(server_url=url)
-            language = config.get("language")
-            if language:
-                engine.set_language(language)
-            return engine
-        return self._load_asr_client(config)
-
-    def _load_asr_client(self, worker_config: dict) -> ASRClient:
-        # request_timeout bounds how long a hung worker can stall the realtime path
-        # before it is killed and auto-restarted. VAD caps segments at a few seconds,
-        # so 60s is generous for a healthy transcribe yet far below the old 120s.
-        client = ASRClient(worker_config, request_timeout=60.0)
-        try:
-            client.start()
-            client.wait_ready()
-            return client
-        except Exception:
-            client.shutdown()
-            raise
 
     def _on_target_language_changed(self, lang: str):
         self._target_language = lang
@@ -454,11 +295,7 @@ class LiveTranslateApp:
         if self._translator:
             self._translator.set_target_language(lang)
         if self._panel:
-            settings = self._panel.get_settings()
-            settings["target_language"] = lang
-            from control_panel import _save_settings
-
-            _save_settings(settings)
+            self._panel.set_target_language(lang)
 
     def _on_model_changed(self, model_config: dict):
         log.info(
@@ -498,204 +335,45 @@ class LiveTranslateApp:
 
     def _switch_asr_engine(self, engine_type: str):
         settings = self._panel.get_settings() if self._panel else {}
-        engine_type, funasr_model = normalize_asr_engine_selection(
-            engine_type, settings.get("funasr_model", self._funasr_model_key)
-        )
-        device = settings.get("asr_device", self._asr_device)
-        hub = "ms"
-        download_proxy = "system"
-        if self._panel:
-            hub = settings.get("hub", "ms")
-            download_proxy = settings.get("download_proxy", "system")
+        plan = self._asr_service.prepare_switch(engine_type, settings)
+        if plan.already_current:
+            if plan.error:
+                parent = (
+                    self._panel
+                    if self._panel and self._panel.isVisible()
+                    else self._overlay
+                )
+                QMessageBox.warning(parent, t("error_title"), plan.error)
+            return
 
-        model_size = self._config["asr"]["model_size"]
-        if self._panel:
-            model_size = settings.get("whisper_model_size", model_size)
-        model_path = None
-        cache_model_key = model_size
-        if engine_type == "whisper":
-            model_path = resolve_custom_whisper_model(model_size)
-            if model_path:
-                cache_model_key = model_path
-        elif engine_type == "funasr":
-            cache_model_key = funasr_model
-
-        remote_asr_url = settings.get(
-            "remote_asr_url",
-            self._config["asr"].get("remote_asr_url", "http://127.0.0.1:8765"),
-        )
-
-        compute = self._config["asr"]["compute_type"]
-        if engine_type == "whisper":
-            signature_model = cache_model_key
-        elif engine_type == "funasr":
-            signature_model = funasr_model
-        elif engine_type == "remote-whisper":
-            # URL is part of the identity so editing it triggers a reconnect.
-            signature_model = remote_asr_url
-        else:
-            signature_model = engine_type
-        signature = (engine_type, signature_model, device, hub, compute)
-
-        with self._asr_lock:
-            current_asr = self._asr
-            current_ready = (
-                self._asr_ready
-                and current_asr is not None
-                and current_asr.status == "ready"
-            )
-            if current_ready and self._asr_signature == signature:
-                return
-            if not current_ready:
-                self._asr_ready = False
-
-        log.info(f"Switching ASR worker: {self._asr_type} -> {engine_type}")
         # Reset interim state for the engine boundary. The active worker is
         # stopped before the target worker starts loading.
-        self._interim_active = False
-        self._interim_pending = ""
-        self._last_interim_samples = 0
-        self._last_interim_check_time = 0.0
-        self._interim_committed_tail = ""
-        self._vad.flush()
-        self._vad._reset()
-
-        cached = is_asr_cached(engine_type, cache_model_key, hub)
-        display_name = ASR_DISPLAY_NAMES.get(engine_type, engine_type)
-        if engine_type == "whisper":
-            display_model = (
-                local_faster_whisper_display_name(model_size)
-                if model_path
-                else model_size
-            ) or Path(model_size).name
-            display_name = f"Whisper {display_model}"
-        elif engine_type == "funasr":
-            display_name = funasr_display_name(funasr_model)
+        self._pipeline.reset_for_asr_switch()
 
         parent = (
             self._panel if self._panel and self._panel.isVisible() else self._overlay
         )
 
-        worker_config = {
-            "engine_type": engine_type,
-            "funasr_model": funasr_model,
-            "model_size": cache_model_key,
-            "device": device,
-            "compute_type": compute,
-            "hub": hub,
-            "language": settings.get(
-                "asr_language", self._config["asr"].get("language", "auto")
-            ),
-            "pad_seconds": (
-                settings.get(
-                    "sensevoice_pad_seconds",
-                    self._config["asr"].get("sensevoice_pad_seconds", 0.5),
-                )
-                if engine_type == "funasr"
-                else settings.get(
-                    "whisper_pad_seconds",
-                    self._config["asr"].get("whisper_pad_seconds", 0.5),
-                )
-                if engine_type == "whisper"
-                else None
-            ),
-            "download_root": str((MODELS_DIR / "huggingface" / "hub").resolve()),
-            "display_name": display_name,
-            "remote_asr_url": remote_asr_url,
-        }
-        target_state = {
-            "type": engine_type,
-            "signature": signature,
-            "device": device,
-            "funasr_model_key": funasr_model
-            if engine_type == "funasr"
-            else self._funasr_model_key,
-            "whisper_model_size": model_size
-            if engine_type == "whisper"
-            else self._whisper_model_size,
-            "config": worker_config,
-            "display_name": display_name,
-            "device_label": (
-                remote_asr_url if engine_type == "remote-whisper" else device
-            ),
-        }
-
-        if not cached:
-            missing = get_missing_models(engine_type, cache_model_key, hub)
-            missing = [m for m in missing if m["type"] != "silero-vad"]
-            if missing:
-                dlg = ModelDownloadDialog(
-                    missing, hub=hub, proxy=download_proxy, parent=parent
-                )
-                if dlg.exec() != QDialog.DialogCode.Accepted:
-                    log.info(f"Download cancelled/failed: {engine_type}")
-                    with self._asr_lock:
-                        self._asr_ready = (
-                            self._asr is not None and self._asr.status == "ready"
-                        )
-                    return
-
-        with self._asr_lock:
-            old_asr = self._asr
-            old_config = dict(self._asr_config) if self._asr_config else None
-            old_state = {
-                "type": self._asr_type,
-                "signature": self._asr_signature,
-                "device": self._asr_device,
-                "funasr_model_key": self._funasr_model_key,
-                "whisper_model_size": self._whisper_model_size,
-                "config": old_config,
-                "display_name": (old_config or {}).get("display_name"),
-                "device_label": (
-                    (old_config or {}).get("remote_asr_url")
-                    if self._asr_type == "remote-whisper"
-                    else self._asr_device
-                ),
-            }
-            self._asr = None
-            self._asr_ready = False
-            self._asr_type = None
-            self._asr_signature = None
-            self._asr_config = None
-            self._asr_error_count = 0
-            self._asr_restart_state = None
-            self._asr_worker_baseline_mb = None
-            self._asr_generation += 1
+        if plan.missing_models:
+            dlg = ModelDownloadDialog(
+                plan.missing_models,
+                hub=plan.hub,
+                proxy=plan.download_proxy,
+                parent=parent,
+            )
+            if dlg.exec() != QDialog.DialogCode.Accepted:
+                log.info(f"Download cancelled/failed: {plan.engine_type}")
+                self._asr_service.mark_download_cancelled()
+                return
 
         dlg = _ModelLoadDialog(
-            t("loading_model").format(name=display_name), parent=parent
+            t("loading_model").format(name=plan.display_name), parent=parent
         )
 
-        new_asr = [None]
-        restored_asr = [None]
-        load_error = [None]
-        restore_error = [None]
+        switch_result = [None]
 
         def _load():
-            if old_asr is not None:
-                log.info(f"Stopping old ASR worker before switch: pid={old_asr.pid}")
-                old_asr.shutdown()
-                self._release_memory_caches()
-            try:
-                new_asr[0] = self._load_engine_client(worker_config)
-            except Exception as e:
-                load_error[0] = str(e)
-                # A remote server that is simply down is an expected, user-actionable
-                # condition, not a bug, so skip the noisy traceback for it.
-                expected = isinstance(e, ConnectionError)
-                log.error(
-                    f"Failed to load ASR worker: {e}", exc_info=not expected
-                )
-                if old_config:
-                    try:
-                        log.info("Restoring previous ASR worker after switch failure")
-                        restored_asr[0] = self._load_engine_client(old_config)
-                    except Exception as restore_exc:
-                        restore_error[0] = str(restore_exc)
-                        log.error(
-                            f"Failed to restore previous ASR worker: {restore_exc}",
-                            exc_info=True,
-                        )
+            switch_result[0] = self._asr_service.switch_worker(plan)
 
         thread = threading.Thread(target=_load, daemon=True)
         thread.start()
@@ -714,33 +392,21 @@ class LiveTranslateApp:
         dlg.exec()
         poll_timer.stop()
 
-        def _activate_asr(client, state):
-            with self._asr_lock:
-                self._asr = client
-                self._asr_type = state["type"]
-                self._asr_signature = state["signature"]
-                self._asr_device = state["device"]
-                self._asr_config = dict(state["config"]) if state["config"] else None
-                self._funasr_model_key = state["funasr_model_key"]
-                self._whisper_model_size = state["whisper_model_size"]
-                self._asr_ready = True
-                self._asr_error_count = 0
-                self._asr_restart_state = dict(state)
-                self._asr_restart_count = 0
-                self._asr_worker_baseline_mb = None
-                self._asr_generation += 1
-
-        if new_asr[0] is not None:
-            _activate_asr(new_asr[0], target_state)
-            if self._overlay:
-                self._overlay.update_asr_device(
-                    f"{display_name} [{target_state['device_label']}]"
-                )
-            log.info(f"ASR worker ready: {engine_type} on {device}")
+        result = switch_result[0]
+        if result is None:
             return
 
-        if restored_asr[0] is not None:
-            _activate_asr(restored_asr[0], old_state)
+        if result.status == "ready":
+            target_state = result.target_state or plan.target_state or {}
+            device_label = target_state.get("device_label", plan.device)
+            if self._overlay:
+                self._overlay.update_asr_device(
+                    f"{plan.display_name} [{device_label}]"
+                )
+            return
+
+        if result.status == "restored":
+            old_state = result.restored_state or {}
             restored_name = old_state.get("display_name") or old_state.get("type")
             if self._overlay:
                 self._overlay.update_asr_device(
@@ -751,22 +417,18 @@ class LiveTranslateApp:
                 t("error_title"),
                 t("error_load_asr").format(
                     error=(
-                        f"{load_error[0] or 'unknown error'}\n"
+                        f"{result.load_error or 'unknown error'}\n"
                         f"{t('asr_restore_succeeded')}"
                     )
                 ),
             )
-            log.info(
-                f"Previous ASR worker restored: "
-                f"{old_state.get('type')} on {old_state.get('device')}"
-            )
             return
 
-        error = load_error[0] or "unknown error"
-        if restore_error[0]:
+        error = result.load_error or "unknown error"
+        if result.restore_error:
             error = (
                 f"{error}\n"
-                f"{t('asr_restore_failed').format(error=restore_error[0])}"
+                f"{t('asr_restore_failed').format(error=result.restore_error)}"
             )
         QMessageBox.warning(
             parent,
@@ -782,13 +444,13 @@ class LiveTranslateApp:
         # The ASR model (and its native-side leak) lives in the worker process now,
         # so sample its RSS too; the main process holds only VAD + Qt.
         worker_rss_mb = 0.0
-        client = self._asr
-        if client is not None and client.pid is not None:
+        worker_pid = self._asr_service.worker_pid
+        if worker_pid is not None:
             try:
                 import psutil
 
                 worker_rss_mb = (
-                    psutil.Process(client.pid).memory_info().rss / 1024 / 1024
+                    psutil.Process(worker_pid).memory_info().rss / 1024 / 1024
                 )
             except Exception:
                 worker_rss_mb = 0.0
@@ -801,7 +463,7 @@ class LiveTranslateApp:
         except Exception:
             pass
         msgs = len(self._overlay._messages) if self._overlay else 0
-        vad_buf = len(self._vad._speech_buffer)
+        vad_buf = self._pipeline.buffer_stats()["chunks"]
         return {
             "rss": rss_mb,
             "worker_rss": worker_rss_mb,
@@ -836,209 +498,22 @@ class LiveTranslateApp:
         except Exception:
             pass
 
-    def _run_asr(self, audio: np.ndarray, kind: str, **kwargs):
-        audio_seconds = len(audio) / 16000
+    def _run_asr(self, audio, kind: str, **kwargs):
+        audio_seconds = len(audio) / self._config["audio"]["sample_rate"]
         asr_start = time.perf_counter()
-        # Snapshot the active client under the lock, then release it: the blocking
-        # cross-process transcribe must not hold _asr_lock, or a slow/hung worker
-        # would freeze the Qt thread on every settings change. ASRClient serializes
-        # its own pipe access, and only this (single) ASR thread calls transcribe.
-        with self._asr_lock:
-            if not self._asr_ready or self._asr is None:
-                return None, 0.0
-            client = self._asr
-            asr_type = self._asr_type
-            funasr_key = self._funasr_model_key
+        if not self._asr_service.is_ready:
+            return None, 0.0
         try:
-            self._apply_pending_asr_settings(client, asr_type, funasr_key)
-            result = client.transcribe(audio, **kwargs)
-        except (ASRWorkerExited, ASRWorkerTimeout) as exc:
-            asr_ms = (time.perf_counter() - asr_start) * 1000
-            self._log_mem_after_asr(f"{kind}:error", audio_seconds, asr_ms)
-            self._recover_asr_worker(client, str(exc))
-            raise
-        except ASRWorkerError as exc:
-            asr_ms = (time.perf_counter() - asr_start) * 1000
-            self._log_mem_after_asr(f"{kind}:error", audio_seconds, asr_ms)
-            fatal = False
-            with self._asr_lock:
-                if self._asr is client:
-                    self._asr_error_count += 1
-                    fatal = not exc.recoverable or self._asr_error_count >= 3
-            if fatal:
-                self._mark_asr_unavailable(str(exc), client)
-            raise
+            result = self._asr_service.transcribe(audio, **kwargs)
         except Exception:
             asr_ms = (time.perf_counter() - asr_start) * 1000
             self._log_mem_after_asr(f"{kind}:error", audio_seconds, asr_ms)
             raise
-        with self._asr_lock:
-            if self._asr is client:
-                self._asr_error_count = 0
-                self._asr_restart_count = 0
+        if result is None:
+            return None, 0.0
         asr_ms = (time.perf_counter() - asr_start) * 1000
         self._log_mem_after_asr(kind, audio_seconds, asr_ms)
         return result, asr_ms
-
-    def _start_worker_from_state(self, state: dict, expected_gen: int) -> bool:
-        """Load a worker from a saved state and activate it only if no newer engine
-        switch happened in the meantime (generation guard). Runs on the ASR thread;
-        the load is intentionally done outside _asr_lock. Returns True on activation."""
-        try:
-            client = self._load_engine_client(state["config"])
-        except Exception as e:
-            log.error(f"ASR worker (re)start failed: {e}", exc_info=True)
-            return False
-        stale = None
-        with self._asr_lock:
-            if self._asr_generation != expected_gen or not self._running:
-                stale = client
-            else:
-                self._asr = client
-                self._asr_type = state["type"]
-                self._asr_signature = state["signature"]
-                self._asr_device = state["device"]
-                self._asr_config = dict(state["config"]) if state["config"] else None
-                self._funasr_model_key = state["funasr_model_key"]
-                self._whisper_model_size = state["whisper_model_size"]
-                self._asr_ready = True
-                self._asr_error_count = 0
-                self._asr_restart_state = dict(state)
-                self._asr_worker_baseline_mb = None
-                self._asr_generation += 1
-        if stale is not None:
-            log.info("Discarding superseded ASR worker (newer switch won the race)")
-            try:
-                stale.shutdown()
-            except Exception:
-                pass
-            return False
-        name = state.get("display_name") or state.get("type")
-        if self._overlay:
-            self._overlay.update_asr_device(
-                f"{name} [{state.get('device_label', state['device'])}]"
-            )
-        return True
-
-    def _recover_asr_worker(self, dead_client, reason: str):
-        """Auto-restart a worker that died mid-session. Without this, a single crash
-        or transcribe timeout would leave ASR permanently silent for the session."""
-        with self._asr_lock:
-            if self._asr is not dead_client:
-                return  # an engine switch already replaced/cleared it
-            state = dict(self._asr_restart_state) if self._asr_restart_state else None
-            attempt = self._asr_restart_count + 1
-            give_up = (
-                state is None
-                or not state.get("config")
-                or attempt > self._asr_restart_max
-            )
-            self._asr_restart_count = attempt
-            self._asr = None
-            self._asr_ready = False
-            self._asr_type = None
-            self._asr_signature = None
-            self._asr_config = None
-            self._asr_error_count = 0
-            self._asr_worker_baseline_mb = None
-            self._asr_generation += 1
-            gen = self._asr_generation
-        try:
-            dead_client.shutdown()
-        except Exception:
-            try:
-                dead_client.terminate()
-            except Exception:
-                pass
-        if not self._running:
-            return  # shutting down; do not spawn a replacement worker
-        if give_up:
-            log.error(
-                f"ASR worker died and auto-restart gave up after "
-                f"{self._asr_restart_max} attempts: {reason}"
-            )
-            if self._overlay:
-                self._overlay.update_asr_device("ASR unavailable")
-            return
-        log.warning(
-            f"ASR worker died ({reason}); auto-restart attempt "
-            f"{attempt}/{self._asr_restart_max}"
-        )
-        self._release_memory_caches()
-        if self._start_worker_from_state(state, gen):
-            log.info(
-                f"ASR worker auto-restarted: {state.get('type')} on "
-                f"{state.get('device')}"
-            )
-        elif self._asr is None and self._overlay:
-            self._overlay.update_asr_device("ASR unavailable")
-
-    def _maybe_recycle_asr_worker(self):
-        """Recycle the worker once its RSS grows well past the post-load baseline, to
-        bound native-side leaks that accumulate in the long-lived worker process.
-        Called from the ASR thread between segments so the reload gap costs no audio
-        beyond what arrives during it."""
-        if not self._running:
-            return
-        with self._asr_lock:
-            client = self._asr
-            if not self._asr_ready or client is None or self._asr_recycling:
-                return
-            state = dict(self._asr_restart_state) if self._asr_restart_state else None
-        if state is None or not state.get("config") or client.pid is None:
-            return
-        try:
-            import psutil
-
-            rss = psutil.Process(client.pid).memory_info().rss / 1024 / 1024
-        except Exception:
-            return
-        if self._asr_worker_baseline_mb is None:
-            self._asr_worker_baseline_mb = rss
-            return
-        if rss < self._asr_worker_baseline_mb + self._asr_recycle_delta_mb:
-            return
-        log.warning(
-            f"ASR worker RSS={rss:.0f}MB grew "
-            f"{rss - self._asr_worker_baseline_mb:.0f}MB over baseline; recycling"
-        )
-        self._recycle_asr_worker(client, state)
-
-    def _recycle_asr_worker(self, old_client, state: dict):
-        # Graceful stop-then-start (no VRAM doubling). The generation guard makes a
-        # concurrent engine switch win over this recycle.
-        with self._asr_lock:
-            if self._asr is not old_client:
-                return
-            self._asr = None
-            self._asr_ready = False
-            self._asr_recycling = True
-            self._asr_worker_baseline_mb = None
-            self._asr_generation += 1
-            gen = self._asr_generation
-        try:
-            old_client.shutdown()
-        except Exception:
-            try:
-                old_client.terminate()
-            except Exception:
-                pass
-        self._release_memory_caches()
-        if not self._running:
-            with self._asr_lock:
-                self._asr_recycling = False
-            return
-        try:
-            started = self._start_worker_from_state(state, gen)
-        finally:
-            with self._asr_lock:
-                self._asr_recycling = False
-        if started:
-            log.info(f"ASR worker recycled: {state.get('type')} on {state.get('device')}")
-        else:
-            log.error("ASR worker recycle failed to restart")
-            if self._asr is None and self._overlay:
-                self._overlay.update_asr_device("ASR unavailable")
 
     def _check_memory_threshold(self, rss_mb: float):
         if self._mem_warned or rss_mb < self._mem_threshold_mb:
@@ -1167,18 +642,9 @@ class LiveTranslateApp:
             return
         n = len(self._subwin.get_target_languages()) if self._subwin else 1
         self._tl_executor = ThreadPoolExecutor(max_workers=max(8, n + 1))
-        self._asr_queue = queue.Queue(maxsize=16)
+        self._pipeline.start()
         self._running = True
         self._paused = False
-        self._audio.start()
-        self._capture_thread = threading.Thread(
-            target=self._capture_loop, daemon=True
-        )
-        self._asr_thread = threading.Thread(
-            target=self._asr_loop, daemon=True
-        )
-        self._capture_thread.start()
-        self._asr_thread.start()
         # Periodic memory snapshot every 30s
         if self._mem_periodic_timer is None:
             self._mem_periodic_timer = QTimer()
@@ -1190,34 +656,10 @@ class LiveTranslateApp:
             f"GPU(alloc/reserved)={snap['gpu_alloc']:.0f}/{snap['gpu_reserved']:.0f}MB "
             f"(baseline for delta tracking)"
         )
-        log.info("Pipeline started (capture + ASR threads)")
 
     def stop(self):
         self._running = False
-        self._audio.stop()
-        if self._capture_thread:
-            self._capture_thread.join(timeout=3)
-            self._capture_thread = None
-        self._asr_queue.put(None)
-        if self._asr_thread:
-            self._asr_thread.join(timeout=10)
-            if self._asr_thread.is_alive():
-                log.warning("ASR thread still running after timeout, proceeding with cleanup")
-            self._asr_thread = None
-        # Flush remaining VAD buffer after pipeline threads are done
-        if self._interim_active:
-            remaining = self._vad.force_flush()
-            if remaining is not None and self._asr_ready:
-                self._process_interim_final(remaining)
-        else:
-            remaining = self._vad.flush()
-            if remaining is not None and self._asr_ready:
-                self._process_segment(remaining)
-        self._interim_active = False
-        self._interim_pending = ""
-        self._last_interim_samples = 0
-        self._last_interim_check_time = 0.0
-        self._interim_committed_tail = ""
+        self._pipeline.stop()
         self._tl_executor.shutdown(wait=True)
         self._transcript.close()
         if self._mem_periodic_timer is not None:
@@ -1233,71 +675,21 @@ class LiveTranslateApp:
             f"GPU(alloc/reserved)={snap['gpu_alloc']:.0f}/{snap['gpu_reserved']:.0f}MB "
             f"asr_calls={self._mem_asr_call_count} outputs={self._asr_count}"
         )
-        self._shutdown_asr_worker()
-        log.info("Pipeline stopped")
+        self._asr_service.shutdown()
 
     def pause(self):
         self._paused = True
-        self._interim_active = False
-        self._interim_pending = ""
-        self._last_interim_samples = 0
-        self._last_interim_check_time = 0.0
-        self._interim_committed_tail = ""
-        if self._overlay:
-            self._overlay.update_monitor(0.0, 0.0)
-        log.info("Pipeline paused")
+        self._pipeline.pause()
 
     def resume(self):
         self._paused = False
-        log.info("Pipeline resumed")
+        self._pipeline.resume()
 
-    def _process_segment(self, speech_segment):
-        """Run ASR + translation on a speech segment. Called from ASR thread and stop()."""
-        seg_len = len(speech_segment) / 16000
-        log.info(f"Speech segment: {seg_len:.1f}s")
-
-        try:
-            result, asr_ms = self._run_asr(speech_segment, "segment")
-        except Exception as e:
-            log.error(f"ASR error: {e}", exc_info=True)
-            return
-        if asr_ms == 0:
-            return
-        if asr_ms > 10000:
-            log.warning(f"ASR took {asr_ms:.0f}ms, possible hang")
-        if result is None:
-            return
-
-        original_text = result["text"].strip()
-        # Skip empty or punctuation-only ASR results
-        if not original_text or not any(c.isalnum() for c in original_text):
-            log.debug(
-                f"ASR returned empty/punctuation-only, skipping: '{result['text']}'"
-            )
-            return
-
-        # Skip suspiciously short text from long segments (likely noise)
-        alnum_chars = sum(1 for c in original_text if c.isalnum())
-        if seg_len >= 2.0 and alnum_chars <= 3:
-            log.debug(
-                f"Noise filter: {seg_len:.1f}s segment produced only '{original_text}', skipping"
-            )
-            return
-
-        source_lang = result["language"]
-        asr_lang_setting = self._panel.get_settings().get("asr_language", "auto") if self._panel else "auto"
-        if asr_lang_setting != "auto" and source_lang != asr_lang_setting:
-            log.info(
-                f"Language filter: expected '{asr_lang_setting}' but got '{source_lang}', "
-                f"discarding: {original_text[:60]}"
-            )
-            return
-
+    def _handle_asr_text(self, original_text: str, source_lang: str, asr_ms: float = 0):
         self._asr_count += 1
         self._msg_id += 1
         msg_id = self._msg_id
         timestamp = datetime.now().strftime("%H:%M:%S")
-        log.info(f"ASR [{source_lang}] ({asr_ms:.0f}ms): {original_text}")
 
         if self._overlay:
             self._overlay.add_message(
@@ -1305,17 +697,15 @@ class LiveTranslateApp:
             )
         self._transcript.write_original(msg_id, timestamp, original_text)
 
-        # Store for subtitle window (translation will be added later)
+        # Store for subtitle window; translation will be added later.
         self._last_original = original_text
         self._last_msg_id = msg_id
 
         target_lang = self._target_language
 
-        # Collect extra languages needed by subtitle window (beyond the primary target)
         extra_langs = set()
         if self._subwin and self._subwin.isVisible():
             subwin_langs = self._subwin.get_target_languages()
-            # Remove primary target and source (no need to translate those)
             extra_langs = subwin_langs - {target_lang, source_lang}
 
         if source_lang == target_lang:
@@ -1331,407 +721,31 @@ class LiveTranslateApp:
                     self._compute_cost(),
                 )
             if self._subwin and self._subwin.isVisible():
-                # Primary is same language; still need to translate extra langs
                 if extra_langs:
                     try:
                         self._tl_executor.submit(
-                            self._translate_subwin_only, original_text, source_lang, extra_langs
+                            self._translate_subwin_only,
+                            original_text,
+                            source_lang,
+                            extra_langs,
                         )
                     except RuntimeError:
                         pass
                 else:
-                    self._subwin.update_text(original_text, {target_lang: original_text})
+                    self._subwin.update_text(
+                        original_text, {target_lang: original_text}
+                    )
         else:
             try:
                 self._tl_executor.submit(
-                    self._translate_async, msg_id, original_text, source_lang,
+                    self._translate_async,
+                    msg_id,
+                    original_text,
+                    source_lang,
                     extra_langs or None,
                 )
             except RuntimeError:
                 log.warning("Translation executor shut down, skipping")
-
-    # ── Incremental ASR ──
-
-    _pysbd_cache = {}  # lang -> pysbd.Segmenter
-
-    @staticmethod
-    def _get_segmenter(lang: str):
-        import pysbd
-        if lang not in LiveTranslateApp._pysbd_cache:
-            pysbd_lang = lang if lang in pysbd.languages.LANGUAGE_CODES else "en"
-            LiveTranslateApp._pysbd_cache[lang] = pysbd.Segmenter(
-                language=pysbd_lang, clean=False
-            )
-        return LiveTranslateApp._pysbd_cache[lang]
-
-    def _split_sentences(self, text: str, lang: str = "en") -> list[str]:
-        """Split text into sentences using pysbd, with comma fallback for long text."""
-        seg = self._get_segmenter(lang)
-        parts = [p for p in seg.segment(text) if p.strip()]
-        if len(parts) > 1:
-            return parts
-
-        # Comma fallback for long unsplit text — split at last balanced comma
-        # CJK 「、」at 25 chars; all commas at 60 chars (long sentence, reduce latency)
-        min_len = 25 if any(c == '、' for c in text) else 60
-        if len(text) > min_len:
-            for i in range(len(text) - 8, 5, -1):
-                if text[i] in ',，;；、':
-                    before = text[:i + 1].strip()
-                    after = text[i + 1:].strip()
-                    if before and after and len(before) > 15 and len(after) > 3:
-                        return [before, after]
-
-        return parts
-
-    @staticmethod
-    def _is_short_utterance(text: str) -> bool:
-        """Check if text has ≤8 alphanumeric chars (likely noise/filler/fragment)."""
-        alnum = sum(1 for c in text if c.isalnum())
-        return alnum <= 8
-
-    def _strip_committed_overlap(self, text: str) -> str:
-        """Remove text that overlaps with previously committed content."""
-        if not self._interim_committed_tail:
-            return text
-        tail = self._interim_committed_tail.lower().rstrip()
-        text_lower = text.lower()
-        # Check if text starts with a suffix of the committed tail
-        max_check = min(len(tail), len(text_lower))
-        for overlap_len in range(max_check, 2, -1):
-            if text_lower[:overlap_len] == tail[-overlap_len:]:
-                stripped = text[overlap_len:].strip()
-                if stripped:
-                    log.debug(f"Stripped echo overlap ({overlap_len} chars): '{text[:overlap_len]}...'")
-                    return stripped
-                return ""
-        return text
-
-    def _do_interim_asr(self) -> bool:
-        """Run ASR on current VAD buffer, output complete sentences, trim consumed audio.
-        Returns True if any sentences were committed."""
-        with self._vad_lock:
-            peek = self._vad.peek_buffer()
-        if peek is None:
-            return False
-        audio, duration = peek
-
-        # Don't bother with very short buffers
-        if duration < 1.5:
-            return False
-
-        # Word timestamp alignment is expensive for repeated interim passes.
-        # The proportional trim path below is less exact but keeps long runs stable.
-        use_word_ts = False
-
-        try:
-            result, asr_ms = self._run_asr(
-                audio, "interim", word_timestamps=use_word_ts
-            ) if use_word_ts else self._run_asr(audio, "interim")
-        except Exception as e:
-            log.error(f"Interim ASR error: {e}", exc_info=True)
-            return False
-
-        if asr_ms == 0:
-            return False
-
-        if result is None:
-            return False
-
-        full_text = result["text"].strip()
-        if not full_text or not any(c.isalnum() for c in full_text):
-            return False
-
-        # Strip echo from previous commit's overlap
-        full_text = self._strip_committed_overlap(full_text)
-        if not full_text:
-            return False
-
-        split_start = time.perf_counter()
-        sentences = self._split_sentences(full_text, result["language"])
-        split_ms = (time.perf_counter() - split_start) * 1000
-        if len(sentences) <= 1:
-            return False
-        log.debug(f"Interim split [{result['language']}] ({split_ms:.1f}ms): {len(sentences)} parts -> {sentences}")
-
-        # All but last are complete; last is still being spoken
-        complete = sentences[:-1]
-
-        committed_text = ""
-        for sent in complete:
-            committed_text += sent
-
-        if not committed_text.strip():
-            return False
-
-        # Determine trim point
-        total_samples = len(audio)
-        if use_word_ts and result.get("words"):
-            words = result["words"]
-            committed_lower = committed_text.lower().rstrip()
-            char_pos = 0
-            last_word_end = 0.0
-            for w in words:
-                word_text = w["word"].strip()
-                idx = committed_lower.find(word_text.lower(), char_pos)
-                if idx >= 0:
-                    char_pos = idx + len(word_text)
-                    last_word_end = w["end"]
-                if char_pos >= len(committed_lower):
-                    break
-            trim_samples = int(last_word_end * 16000)
-        else:
-            # Proportional trim with safety margin to reduce echo
-            ratio = len(committed_text) / max(len(full_text), 1)
-            margin = int(0.3 * 16000)  # 0.3s extra trim to avoid re-recognition
-            trim_samples = int(ratio * total_samples) + margin
-            # Don't over-trim: keep at least 0.5s for the remaining sentence
-            max_trim = total_samples - int(0.5 * 16000)
-            trim_samples = min(trim_samples, max(max_trim, 0))
-            # Minimum trim to prevent re-recognition loops
-            min_trim = int(0.3 * 16000)
-            if trim_samples < min_trim and trim_samples > 0:
-                trim_samples = min(min_trim, total_samples // 2)
-
-        # Output committed sentences
-        actually_committed = False
-        for sent in complete:
-            text = sent.strip()
-            if not text:
-                continue
-            if self._is_short_utterance(text):
-                self._interim_pending += text
-                log.debug(f"Interim short utterance buffered: '{text}', pending='{self._interim_pending}'")
-                continue
-
-            if self._interim_pending:
-                text = self._interim_pending + text
-                self._interim_pending = ""
-
-            self._process_segment_text(text, result["language"], asr_ms)
-            actually_committed = True
-
-        if not actually_committed:
-            return False
-
-        if trim_samples > 0:
-            with self._vad_lock:
-                self._vad.trim_front(trim_samples)
-
-        # Track committed text tail for echo dedup
-        self._interim_committed_tail = committed_text[-50:] if len(committed_text) > 50 else committed_text
-
-        self._interim_active = True
-        log.info(f"Interim ASR: committed {len(complete)} sentence(s), trimmed {trim_samples / 16000:.2f}s")
-        return True
-
-    def _process_segment_text(self, text: str, source_lang: str, asr_ms: float = 0):
-        """Output a text result (from interim or final) — similar to _process_segment but skips ASR."""
-        original_text = text.strip()
-        if not original_text or not any(c.isalnum() for c in original_text):
-            return
-
-        asr_lang_setting = self._panel.get_settings().get("asr_language", "auto") if self._panel else "auto"
-        if asr_lang_setting != "auto" and source_lang != asr_lang_setting:
-            log.info(f"Language filter: expected '{asr_lang_setting}' but got '{source_lang}', discarding: {original_text[:60]}")
-            return
-
-        self._asr_count += 1
-        self._msg_id += 1
-        msg_id = self._msg_id
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        log.info(f"ASR [{source_lang}] ({asr_ms:.0f}ms, interim): {original_text}")
-
-        if self._overlay:
-            self._overlay.add_message(msg_id, timestamp, original_text, source_lang, asr_ms)
-        self._transcript.write_original(msg_id, timestamp, original_text)
-
-        self._last_original = original_text
-        self._last_msg_id = msg_id
-
-        target_lang = self._target_language
-        extra_langs = set()
-        if self._subwin and self._subwin.isVisible():
-            subwin_langs = self._subwin.get_target_languages()
-            extra_langs = subwin_langs - {target_lang, source_lang}
-
-        if source_lang == target_lang:
-            log.info(f"Same language ({source_lang}), no translation")
-            self._transcript.finalize_no_translation(msg_id)
-            if self._overlay:
-                self._overlay.update_translation(msg_id, "", 0)
-                self._overlay.update_stats(self._asr_count, self._translate_count, self._total_prompt_tokens, self._total_completion_tokens, self._compute_cost())
-            if self._subwin and self._subwin.isVisible():
-                if extra_langs:
-                    try:
-                        self._tl_executor.submit(self._translate_subwin_only, original_text, source_lang, extra_langs)
-                    except RuntimeError:
-                        pass
-                else:
-                    self._subwin.update_text(original_text, {target_lang: original_text})
-        else:
-            try:
-                self._tl_executor.submit(self._translate_async, msg_id, original_text, source_lang, extra_langs or None)
-            except RuntimeError:
-                log.warning("Translation executor shut down, skipping")
-    def _process_interim_final(self, speech_segment):
-        """Handle VAD flush after interim outputs were already made."""
-        seg_len = len(speech_segment) / 16000
-        log.info(f"Interim final segment: {seg_len:.1f}s")
-
-        try:
-            result, asr_ms = self._run_asr(speech_segment, "interim_final")
-        except Exception as e:
-            log.error(f"Interim final ASR error: {e}", exc_info=True)
-            return
-        if asr_ms == 0:
-            return
-
-        if result is None:
-            # Flush any remaining pending
-            if self._interim_pending:
-                text = self._interim_pending
-                self._interim_pending = ""
-                lang = self._panel.get_settings().get("asr_language", "auto") if self._panel else "auto"
-                if lang == "auto":
-                    lang = "unknown"
-                self._process_segment_text(text, lang)
-            return
-
-        original_text = result["text"].strip()
-
-        # Strip echo from previous commit's overlap
-        original_text = self._strip_committed_overlap(original_text)
-
-        # Prepend any remaining pending short utterances
-        if self._interim_pending:
-            original_text = self._interim_pending + original_text
-            self._interim_pending = ""
-
-        if not original_text or not any(c.isalnum() for c in original_text):
-            return
-
-        # Apply noise filter like _process_segment
-        alnum_chars = sum(1 for c in original_text if c.isalnum())
-        if seg_len >= 2.0 and alnum_chars <= 3:
-            log.debug(f"Noise filter: {seg_len:.1f}s segment produced only '{original_text}', skipping")
-            return
-
-        self._process_segment_text(original_text, result["language"], asr_ms)
-
-    def _capture_loop(self):
-        silence_chunk = np.zeros(
-            int(
-                self._config["audio"]["sample_rate"]
-                * self._config["audio"]["chunk_duration"]
-            ),
-            dtype=np.float32,
-        )
-        while self._running:
-            item = self._audio.get_audio(timeout=1.0)
-            if item is None:
-                if self._vad._is_speaking and not self._paused:
-                    n = self._vad._get_effective_silence_limit() + 1
-                    for _ in range(n):
-                        with self._vad_lock:
-                            seg = self._vad.process_chunk(silence_chunk)
-                        if seg is not None and self._asr_ready:
-                            self._enqueue_asr("vad_flush", seg)
-                            break
-                continue
-
-            chunk, mic_rms = item
-
-            if self._paused:
-                continue
-
-            rms = float(np.sqrt(np.mean(chunk**2)))
-
-            if self._overlay:
-                self._overlay.update_monitor(rms, self._vad.last_confidence, mic_rms)
-
-            with self._vad_lock:
-                speech_segment = self._vad.process_chunk(chunk)
-
-            if speech_segment is None:
-                # Still accumulating — check for interim ASR
-                if (self._incremental_enabled and self._asr_ready
-                        and self._vad._is_speaking):
-                    buf_samples = self._vad._speech_samples
-                    total_dur = buf_samples / 16000
-                    elapsed = (buf_samples - self._last_interim_samples) / 16000
-                    now = time.perf_counter()
-                    cooldown = now - self._last_interim_check_time
-                    if total_dur >= self._interim_interval and elapsed >= self._interim_interval and cooldown >= 1.0:
-                        self._last_interim_check_time = now
-                        self._enqueue_asr("interim", None)
-                continue
-
-            if not self._asr_ready:
-                log.debug("ASR not ready, dropping segment")
-                continue
-
-            self._enqueue_asr("vad_flush", speech_segment)
-
-    def _enqueue_asr(self, seg_type: str, segment):
-        try:
-            self._asr_queue.put_nowait((seg_type, segment))
-        except queue.Full:
-            try:
-                dropped = self._asr_queue.get_nowait()
-                log.warning(f"ASR queue full, dropped {dropped[0]} segment")
-            except queue.Empty:
-                pass
-            try:
-                self._asr_queue.put_nowait((seg_type, segment))
-            except queue.Full:
-                log.warning("ASR queue still full after drop, skipping segment")
-
-    def _asr_loop(self):
-        while self._running:
-            try:
-                item = self._asr_queue.get(timeout=1.0)
-            except queue.Empty:
-                # Idle moment: recycle a bloated worker while no audio is waiting.
-                # Guarded so an unexpected error can never kill this thread (which
-                # would itself silence ASR permanently).
-                try:
-                    self._maybe_recycle_asr_worker()
-                except Exception:
-                    log.error("ASR worker recycle check failed", exc_info=True)
-                continue
-
-            if item is None:
-                break
-
-            seg_type, segment = item
-
-            if seg_type == "vad_flush":
-                if self._interim_active:
-                    self._process_interim_final(segment)
-                else:
-                    self._process_segment(segment)
-                self._interim_active = False
-                self._interim_pending = ""
-                self._last_interim_samples = 0
-                self._last_interim_check_time = 0.0
-                self._interim_committed_tail = ""
-            elif seg_type == "interim":
-                self._drain_interim_duplicates()
-                self._do_interim_asr()
-                with self._vad_lock:
-                    self._last_interim_samples = self._vad._speech_samples
-
-    def _drain_interim_duplicates(self):
-        while True:
-            try:
-                item = self._asr_queue.get_nowait()
-            except queue.Empty:
-                break
-            if item is None or item[0] != "interim":
-                self._asr_queue.put(item)
-                break
-
 
 def main():
     setup_logging()
@@ -1740,7 +754,16 @@ def main():
     config.setdefault("asr", {})
     config["asr"].setdefault("asr_engine", "funasr")
     config["asr"].setdefault("funasr_model", DEFAULT_FUNASR_MODEL)
-    saved = _load_saved_settings()
+    config["asr"].setdefault("sherpa_onnx_model", "")
+    config["asr"].setdefault("sherpa_onnx_provider", "auto")
+    config["asr"].setdefault("sherpa_onnx_num_threads", 2)
+    config["asr"].setdefault("sherpa_onnx_decoding_method", "greedy_search")
+    config["asr"].setdefault("parakeet_cpp_model", "")
+    config["asr"].setdefault("parakeet_cpp_runtime_dir", "")
+    config["asr"].setdefault("parakeet_cpp_backend", "auto")
+    config["asr"].setdefault("parakeet_cpp_decoder", "auto")
+    config["asr"].setdefault("parakeet_cpp_word_timestamps", True)
+    saved = load_settings(config)
     migrate_funasr_settings(saved)
 
     # Log actual effective config
@@ -1784,7 +807,7 @@ def main():
         wizard = SetupWizardDialog()
         if wizard.exec() != QDialog.DialogCode.Accepted:
             sys.exit(0)
-        saved = _load_saved_settings()
+        saved = load_settings(config)
         log.info("Setup wizard completed")
 
         # Prompt user to configure translation API
@@ -1800,7 +823,7 @@ def main():
         dlg = ModelEditDialog(None, {
             "name": "hunyuan-mt-chimera-7b",
             "api_base": "http://127.0.0.1:1234/v1",
-            "api_key": "sk-lm-tHzDfNGm:dgxlip7eebn3HIMxivqN",
+            "api_key": "",
             "model": "hunyuan-mt-chimera-7b",
         })
         dlg.setWindowTitle(t("setup_api_title"))
@@ -1809,7 +832,7 @@ def main():
             if data.get("api_key"):
                 saved["models"] = [data]
                 saved["active_model"] = 0
-                _save_settings(saved)
+                save_settings(saved)
                 log.info(f"Translation API configured: {data['name']}")
         # If user skips, ControlPanel will create default placeholder from config.yaml
 
@@ -1817,13 +840,31 @@ def main():
     else:
         saved = saved or {}
         current_engine = saved.get("asr_engine", config["asr"].get("asr_engine", "funasr"))
+        current_engine, current_funasr_model = normalize_asr_engine_selection(
+            current_engine, saved.get("funasr_model", config["asr"].get("funasr_model"))
+        )
+        if current_engine == "funasr":
+            startup_model_key = current_funasr_model
+        elif current_engine == "crispasr":
+            startup_model_key = saved.get(
+                "crispasr_model",
+                config["asr"].get("crispasr_model", ""),
+            )
+        elif current_engine == "sherpa-onnx":
+            startup_model_key = saved.get(
+                "sherpa_onnx_model",
+                config["asr"].get("sherpa_onnx_model", ""),
+            )
+        elif current_engine == "parakeet-cpp":
+            startup_model_key = saved.get(
+                "parakeet_cpp_model",
+                config["asr"].get("parakeet_cpp_model", ""),
+            )
+        else:
+            startup_model_key = saved.get("whisper_model_size", config["asr"]["model_size"])
         missing = get_missing_models(
             current_engine,
-            (
-                saved.get("funasr_model", config["asr"].get("funasr_model"))
-                if current_engine == "funasr"
-                else saved.get("whisper_model_size", config["asr"]["model_size"])
-            ),
+            startup_model_key,
             saved.get("hub", "ms"),
         )
         if missing:
@@ -1955,33 +996,26 @@ def main():
 
     # --- Subtitle window toggle ---
     def _save_overlay_pos():
-        settings = panel.get_settings()
         pos = overlay.pos()
         size = overlay.size()
-        settings["overlay_x"] = pos.x()
-        settings["overlay_y"] = pos.y()
-        settings["overlay_w"] = size.width()
-        settings["overlay_h"] = size.height()
-        panel._current_settings.update({
-            "overlay_x": pos.x(), "overlay_y": pos.y(),
-            "overlay_w": size.width(), "overlay_h": size.height(),
+        panel.update_settings({
+            "overlay_x": pos.x(),
+            "overlay_y": pos.y(),
+            "overlay_w": size.width(),
+            "overlay_h": size.height(),
         })
-        _save_settings(settings)
 
     overlay.position_changed.connect(_save_overlay_pos)
 
     subwin_toggle_action = QAction(t("subwin_show"), checkable=True)
 
     def _save_subwin_state():
-        settings = panel.get_settings()
-        sm = settings.get("subtitle_mode") or {}
-        sm["enabled"] = subwin.isVisible()
         pos = subwin.pos()
-        sm["window_x"] = pos.x()
-        sm["window_y"] = pos.y()
-        settings["subtitle_mode"] = sm
-        panel._current_settings["subtitle_mode"] = sm
-        _save_settings(settings)
+        panel.update_subtitle_mode({
+            "enabled": subwin.isVisible(),
+            "window_x": pos.x(),
+            "window_y": pos.y(),
+        })
 
     _subwin_notified = [False]
 
@@ -2033,7 +1067,7 @@ def main():
         sm["click_through"] = checked
         settings["subtitle_mode"] = sm
         panel._current_settings["subtitle_mode"] = sm
-        _save_settings(settings)
+        save_settings(settings)
         w = panel._subtitle_widget
         w._click_through_check.blockSignals(True)
         w._click_through_check.setChecked(checked)
@@ -2106,24 +1140,16 @@ def main():
     taskbar_action = QAction(t("taskbar"), checkable=True)
 
     # Tray → overlay sync
-    ct_action.toggled.connect(lambda v: overlay._handle._ct_check.setChecked(v))
-    topmost_action.toggled.connect(
-        lambda v: overlay._handle._topmost_check.setChecked(v)
-    )
-    autoscroll_action.toggled.connect(
-        lambda v: overlay._handle._auto_scroll.setChecked(v)
-    )
-    taskbar_action.toggled.connect(
-        lambda v: overlay._handle._taskbar_check.setChecked(v)
-    )
+    ct_action.toggled.connect(overlay.set_click_through_checked)
+    topmost_action.toggled.connect(overlay.set_topmost_checked)
+    autoscroll_action.toggled.connect(overlay.set_auto_scroll_checked)
+    taskbar_action.toggled.connect(overlay.set_taskbar_checked)
 
     # Overlay → tray sync
-    overlay._handle.click_through_toggled.connect(lambda v: ct_action.setChecked(v))
-    overlay._handle.topmost_toggled.connect(lambda v: topmost_action.setChecked(v))
-    overlay._handle.auto_scroll_toggled.connect(
-        lambda v: autoscroll_action.setChecked(v)
-    )
-    overlay._handle.taskbar_toggled.connect(lambda v: taskbar_action.setChecked(v))
+    overlay.click_through_toggled.connect(lambda v: ct_action.setChecked(v))
+    overlay.topmost_toggled.connect(lambda v: topmost_action.setChecked(v))
+    overlay.auto_scroll_toggled.connect(lambda v: autoscroll_action.setChecked(v))
+    overlay.taskbar_toggled.connect(lambda v: taskbar_action.setChecked(v))
 
     overlay_menu.addAction(ct_action)
     overlay_menu.addAction(topmost_action)
@@ -2155,27 +1181,12 @@ def main():
     def _on_tray_model_switch(index):
         models = panel.get_settings().get("models", [])
         if 0 <= index < len(models):
-            from control_panel import _save_settings
-
-            settings = panel.get_settings()
-            settings["active_model"] = index
-            panel._current_settings["active_model"] = index
-            _save_settings(settings)
-            panel._refresh_model_list()
-            live_trans._on_model_changed(models[index])
-            overlay.set_models(models, index)
+            panel.set_active_model(index)
 
     def on_overlay_model_switch(index):
         models = panel.get_settings().get("models", [])
         if 0 <= index < len(models):
-            from control_panel import _save_settings
-
-            settings = panel.get_settings()
-            settings["active_model"] = index
-            panel._current_settings["active_model"] = index
-            _save_settings(settings)
-            panel._refresh_model_list()
-            live_trans._on_model_changed(models[index])
+            panel.set_active_model(index)
         _rebuild_model_menu()
 
     model_menu.aboutToShow.connect(_rebuild_model_menu)
@@ -2209,12 +1220,6 @@ def main():
     def _on_tray_lang_switch(lang_code):
         overlay.set_target_language(lang_code)
         live_trans._on_target_language_changed(lang_code)
-        from control_panel import _save_settings
-
-        settings = panel.get_settings()
-        settings["target_language"] = lang_code
-        panel._current_settings["target_language"] = lang_code
-        _save_settings(settings)
 
     # Overlay → tray lang sync
     def _on_overlay_lang_changed(lang_code):
@@ -2250,19 +1255,11 @@ def main():
         _asr_lang_actions[current_asr_lang].setChecked(True)
 
     def _on_tray_asr_lang(code):
-        from control_panel import _save_settings
-
-        live_trans._set_asr_language(code)
-        settings = panel.get_settings()
-        settings["asr_language"] = code
-        panel._current_settings["asr_language"] = code
-        _save_settings(settings)
-        # Sync control panel combo
-        idx = panel._asr_lang.findData(code)
-        if idx >= 0:
-            panel._asr_lang.blockSignals(True)
-            panel._asr_lang.setCurrentIndex(idx)
-            panel._asr_lang.blockSignals(False)
+        live_trans._asr_service.set_language(code)
+        panel.set_asr_language(code)
+        overlay.set_source_language(code)
+        if code in _asr_lang_actions:
+            _asr_lang_actions[code].setChecked(True)
 
     menu.addMenu(asr_lang_menu)
     menu.addSeparator()
@@ -2298,15 +1295,16 @@ def main():
     def _on_overlay_source_lang(code):
         """Overlay source language combo → sync to panel + ASR engine + tray."""
         _on_tray_asr_lang(code)
-        overlay.set_source_language(code)
 
-    def _on_panel_asr_lang_changed(_index):
-        """Panel ASR language combo → sync to overlay."""
-        code = panel._asr_lang.currentData() or "auto"
+    def _on_panel_asr_lang_changed(code):
+        """Panel ASR language combo → sync to runtime, overlay, and tray."""
+        live_trans._asr_service.set_language(code)
         overlay.set_source_language(code)
+        if code in _asr_lang_actions:
+            _asr_lang_actions[code].setChecked(True)
 
     overlay.source_language_changed.connect(_on_overlay_source_lang)
-    panel._asr_lang.currentIndexChanged.connect(_on_panel_asr_lang_changed)
+    panel.asr_language_changed.connect(_on_panel_asr_lang_changed)
     overlay.model_switch_requested.connect(on_overlay_model_switch)
     overlay.start_requested.connect(on_resume)
     overlay.stop_requested.connect(on_pause)
