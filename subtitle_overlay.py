@@ -17,7 +17,6 @@ from PyQt6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
-    QSizeGrip,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -542,6 +541,38 @@ class MonitorBar(QWidget):
         )
 
 
+class _ResizeGrip(QWidget):
+    """Resize without the platform size-grip behavior at DPI boundaries."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(20, 20)
+        self.setCursor(QCursor(Qt.CursorShape.SizeFDiagCursor))
+        self.setStyleSheet("background: rgba(255,255,255,70); border-radius: 4px;")
+        self._start_pos = None
+        self._start_size = None
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._start_pos = event.globalPosition().toPoint()
+            self._start_size = self.window().size()
+            event.accept()
+
+    def mouseMoveEvent(self, event):
+        if self._start_pos is not None and event.buttons() & Qt.MouseButton.LeftButton:
+            delta = event.globalPosition().toPoint() - self._start_pos
+            self.window().resize(
+                self._start_size.width() + delta.x(),
+                self._start_size.height() + delta.y(),
+            )
+            event.accept()
+
+    def mouseReleaseEvent(self, event):
+        self._start_pos = None
+        self._start_size = None
+        event.accept()
+
+
 class _DragArea(QWidget):
     """Small draggable area (title + grip)."""
 
@@ -560,11 +591,20 @@ class _DragArea(QWidget):
             )
 
     def mouseMoveEvent(self, event):
-        if self._drag_pos and event.buttons() & Qt.MouseButton.LeftButton:
-            self.window().move(event.globalPosition().toPoint() - self._drag_pos)
+        if self._drag_pos is not None and event.buttons() & Qt.MouseButton.LeftButton:
+            cursor = event.globalPosition().toPoint()
+            screen = QApplication.screenAt(cursor)
+            if screen is None:
+                return
+            window = self.window()
+            bounds = screen.availableGeometry()
+            wanted = cursor - self._drag_pos
+            x = max(bounds.left(), min(wanted.x(), bounds.right() - window.width() + 1))
+            y = max(bounds.top(), min(wanted.y(), bounds.bottom() - window.height() + 1))
+            window.move(x, y)
 
     def mouseReleaseEvent(self, event):
-        if self._drag_pos:
+        if self._drag_pos is not None:
             self._drag_pos = None
             self.drag_finished.emit()
 
@@ -916,6 +956,7 @@ class SubtitleOverlay(QWidget):
         self._pos_save_timer.setInterval(500)
         self._pos_save_timer.timeout.connect(lambda: self.position_changed.emit())
         self._last_saved_geo = None
+        self._size_limits = None
         self._setup_ui()
 
         self.add_message_signal.connect(self._on_add_message)
@@ -944,6 +985,7 @@ class SubtitleOverlay(QWidget):
         y = geo.bottom() - height - 60
         self.setGeometry(x, y, width, height)
         self.setMinimumSize(480, 200)
+        self._update_size_limits(screen)
 
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
@@ -1012,9 +1054,7 @@ class SubtitleOverlay(QWidget):
 
         grip_row = QHBoxLayout()
         grip_row.addStretch()
-        self._grip = QSizeGrip(self)
-        self._grip.setFixedSize(16, 16)
-        self._grip.setStyleSheet("background: transparent;")
+        self._grip = _ResizeGrip(self)
         grip_row.addWidget(self._grip)
         container_layout.addLayout(grip_row)
 
@@ -1032,8 +1072,43 @@ class SubtitleOverlay(QWidget):
             self._last_saved_geo = geo
             self._pos_save_timer.start()
 
+    def _update_size_limits(self, screen=None):
+        if screen is None:
+            screen = QApplication.screenAt(self.frameGeometry().topLeft())
+        if screen is None:
+            screen = QApplication.screenAt(self.frameGeometry().center())
+        if screen is None:
+            screen = QApplication.primaryScreen()
+        if screen is None:
+            return
+        bounds = screen.availableGeometry()
+        # Leave a margin so the resize handle stays reachable on every screen.
+        limits = (max(1, bounds.width() - 20), max(1, bounds.height() - 20))
+        if limits == self._size_limits:
+            return
+        self._size_limits = limits
+        self.setMinimumSize(min(480, limits[0]), min(200, limits[1]))
+        self.setMaximumSize(*limits)
+
+    def restore_geometry(self, x=None, y=None, width=None, height=None):
+        saved_position = type(x) is int and type(y) is int
+        screen = QApplication.screenAt(QPoint(x, y)) if saved_position else None
+        if screen is None:
+            screen = QApplication.primaryScreen()
+            x, y = self.x(), self.y()
+        if screen is None:
+            return
+        self._update_size_limits(screen)
+        if type(width) is int and type(height) is int and width > 0 and height > 0:
+            self.resize(min(width, self.maximumWidth()), min(height, self.maximumHeight()))
+        bounds = screen.availableGeometry()
+        x = max(bounds.left(), min(x, bounds.right() - self.width() + 1))
+        y = max(bounds.top(), min(y, bounds.bottom() - self.height() + 1))
+        self.move(x, y)
+
     def moveEvent(self, event):
         super().moveEvent(event)
+        self._update_size_limits()
         self._schedule_pos_save()
 
     def resizeEvent(self, event):
