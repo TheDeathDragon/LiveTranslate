@@ -597,6 +597,7 @@ class _DragArea(QWidget):
             if screen is None:
                 return
             window = self.window()
+            window._update_size_limits(screen)
             bounds = screen.availableGeometry()
             wanted = cursor - self._drag_pos
             x = max(bounds.left(), min(wanted.x(), bounds.right() - window.width() + 1))

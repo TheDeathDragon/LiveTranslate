@@ -1,5 +1,6 @@
 import os
 import unittest
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -84,6 +85,53 @@ class OverlayGeometryTests(unittest.TestCase):
         )
 
         self.assertTrue(bounds.contains(overlay.geometry()))
+
+    def test_drag_across_three_screens_updates_limits(self):
+        class Screen:
+            def __init__(self, bounds):
+                self._bounds = bounds
+
+            def availableGeometry(self):
+                return self._bounds
+
+        large = Screen(QRect(0, 0, 1200, 900))
+        small = Screen(QRect(1200, 0, 800, 600))
+        raised = Screen(QRect(2000, -200, 1000, 700))
+        overlay = SubtitleOverlay({})
+        overlay._update_size_limits(large)
+        overlay.resize(900, 700)
+        overlay.move(50, 50)
+        drag = _DragArea(overlay)
+
+        def screen_at(point):
+            if point.x() >= 2000:
+                return raised
+            return small if point.x() >= 1200 else large
+
+        with patch("subtitle_overlay.QApplication") as app_class:
+            app_class.screenAt.side_effect = screen_at
+            drag.mousePressEvent(mouse_event(QEvent.Type.MouseButtonPress, 60, 60))
+            drag.mouseMoveEvent(mouse_event(QEvent.Type.MouseMove, 1300, 100))
+            drag.mouseReleaseEvent(mouse_event(QEvent.Type.MouseButtonRelease, 1300, 100))
+
+            self.assertTrue(
+                small.availableGeometry().contains(overlay.geometry()), overlay.geometry()
+            )
+            self.assertEqual((overlay.maximumWidth(), overlay.maximumHeight()), (780, 580))
+
+            drag.mousePressEvent(mouse_event(QEvent.Type.MouseButtonPress, 1210, 10))
+            drag.mouseMoveEvent(mouse_event(QEvent.Type.MouseMove, 2100, -100))
+            drag.mouseReleaseEvent(mouse_event(QEvent.Type.MouseButtonRelease, 2100, -100))
+
+            self.assertTrue(raised.availableGeometry().contains(overlay.geometry()))
+            self.assertEqual((overlay.maximumWidth(), overlay.maximumHeight()), (980, 680))
+
+            drag.mousePressEvent(mouse_event(QEvent.Type.MouseButtonPress, 2010, -190))
+            drag.mouseMoveEvent(mouse_event(QEvent.Type.MouseMove, 100, 100))
+            drag.mouseReleaseEvent(mouse_event(QEvent.Type.MouseButtonRelease, 100, 100))
+
+        self.assertTrue(large.availableGeometry().contains(overlay.geometry()))
+        self.assertEqual((overlay.maximumWidth(), overlay.maximumHeight()), (1180, 880))
 
 
 if __name__ == "__main__":
