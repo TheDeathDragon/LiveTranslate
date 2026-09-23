@@ -17,7 +17,6 @@ from PyQt6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
-    QSizeGrip,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -542,6 +541,52 @@ class MonitorBar(QWidget):
         )
 
 
+def _screen_size_limits(screen):
+    """Cap an overlay at 80% of a screen's available area."""
+    bounds = screen.availableGeometry()
+    return max(1, bounds.width() * 4 // 5), max(1, bounds.height() * 4 // 5)
+
+
+def _connected_size_limits(fallback_screen):
+    limits = [_screen_size_limits(s) for s in QApplication.screens()]
+    limits.append(_screen_size_limits(fallback_screen))
+    return max(width for width, _ in limits), max(height for _, height in limits)
+
+
+class _ResizeGrip(QWidget):
+    """Resize the overlay without Qt's native QSizeGrip across mixed-DPI screens."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(20, 20)
+        self.setCursor(QCursor(Qt.CursorShape.SizeFDiagCursor))
+        self.setStyleSheet("background: rgba(255,255,255,70); border-radius: 4px;")
+        self.setToolTip("Resize")
+        self._start_pos = None
+        self._start_size = None
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._start_pos = event.globalPosition().toPoint()
+            self._start_size = self.window().size()
+            event.accept()
+
+    def mouseMoveEvent(self, event):
+        if self._start_pos is not None and event.buttons() & Qt.MouseButton.LeftButton:
+            delta = event.globalPosition().toPoint() - self._start_pos
+            self.window()._resize_intentionally(
+                self._start_size.width() + delta.x(),
+                self._start_size.height() + delta.y(),
+            )
+            event.accept()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._start_pos = None
+            self._start_size = None
+            event.accept()
+
+
 class _DragArea(QWidget):
     """Small draggable area (title + grip)."""
 
@@ -560,11 +605,21 @@ class _DragArea(QWidget):
             )
 
     def mouseMoveEvent(self, event):
-        if self._drag_pos and event.buttons() & Qt.MouseButton.LeftButton:
-            self.window().move(event.globalPosition().toPoint() - self._drag_pos)
+        if self._drag_pos is not None and event.buttons() & Qt.MouseButton.LeftButton:
+            cursor = event.globalPosition().toPoint()
+            cursor_screen = QApplication.screenAt(cursor)
+            if cursor_screen is None:
+                return
+            window = self.window()
+            wanted = cursor - self._drag_pos
+            # The grabbed point stays on a screen; the rest may span two screens.
+            window._update_size_limits(
+                QApplication.screenAt(wanted) or cursor_screen, preserve_current=True
+            )
+            window.move(wanted)
 
     def mouseReleaseEvent(self, event):
-        if self._drag_pos:
+        if self._drag_pos is not None:
             self._drag_pos = None
             self.drag_finished.emit()
 
@@ -916,7 +971,12 @@ class SubtitleOverlay(QWidget):
         self._pos_save_timer.setInterval(500)
         self._pos_save_timer.timeout.connect(lambda: self.position_changed.emit())
         self._last_saved_geo = None
+        self._size_limits = None
+        self._preferred_width = None
+        self._allow_width_change = False
+        self._correcting_width = False
         self._setup_ui()
+        self._preferred_width = self.width()
 
         self.add_message_signal.connect(self._on_add_message)
         self.update_translation_signal.connect(self._on_update_translation)
@@ -944,6 +1004,7 @@ class SubtitleOverlay(QWidget):
         y = geo.bottom() - height - 60
         self.setGeometry(x, y, width, height)
         self.setMinimumSize(480, 200)
+        self._update_size_limits()
 
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
@@ -1012,9 +1073,7 @@ class SubtitleOverlay(QWidget):
 
         grip_row = QHBoxLayout()
         grip_row.addStretch()
-        self._grip = QSizeGrip(self)
-        self._grip.setFixedSize(16, 16)
-        self._grip.setStyleSheet("background: transparent;")
+        self._grip = _ResizeGrip(self)
         grip_row.addWidget(self._grip)
         container_layout.addLayout(grip_row)
 
@@ -1032,12 +1091,111 @@ class SubtitleOverlay(QWidget):
             self._last_saved_geo = geo
             self._pos_save_timer.start()
 
+    def _resize_intentionally(self, width, height):
+        self._allow_width_change = True
+        try:
+            self.resize(width, height)
+            self._preferred_width = self.width()
+        finally:
+            self._allow_width_change = False
+
+    def _update_size_limits(self, screen=None, preserve_current=False):
+        if screen is None:
+            screen = QApplication.screenAt(self.frameGeometry().topLeft())
+        if screen is None:
+            screen = QApplication.screenAt(self.frameGeometry().center())
+        if screen is None:
+            screen = QApplication.primaryScreen()
+        if screen is None:
+            return
+        limits = _screen_size_limits(screen)
+        if preserve_current:
+            # Moving to a smaller display must not resize the window. Still cap
+            # an abnormal size at 80% of the largest connected display.
+            safe_max = _connected_size_limits(screen)
+            if self._preferred_width is not None:
+                self._preferred_width = min(self._preferred_width, safe_max[0])
+            reference_width = (
+                self.width()
+                if self._allow_width_change or self._preferred_width is None
+                else self._preferred_width
+            )
+            limits = (
+                max(limits[0], min(reference_width, safe_max[0])),
+                max(limits[1], min(self.height(), safe_max[1])),
+            )
+        if (limits == self._size_limits
+                and limits == (self.maximumWidth(), self.maximumHeight())):
+            return
+        self._size_limits = limits
+        self.setMinimumSize(min(480, limits[0]), min(200, limits[1]))
+        self.setMaximumSize(*limits)
+
+    def restore_geometry(self, x=None, y=None, width=None, height=None):
+        saved_position = type(x) is int and type(y) is int
+        title_screen = None
+        origin_screen = None
+        if saved_position:
+            try:
+                title_screen = QApplication.screenAt(QPoint(x + 50, y + 20))
+                origin_screen = QApplication.screenAt(QPoint(x, y))
+            except OverflowError:
+                pass
+        if title_screen is None:
+            screen = QApplication.primaryScreen()
+            x, y = self.x(), self.y()
+        else:
+            screen = origin_screen or title_screen
+        if screen is None:
+            return
+
+        bounds = screen.availableGeometry()
+        safe_max = _connected_size_limits(screen)
+        local_max = _screen_size_limits(screen)
+        self.setMaximumSize(*safe_max)
+
+        oversized = False
+        if type(width) is int and type(height) is int and width > 0 and height > 0:
+            oversized = width > safe_max[0] or height > safe_max[1]
+            size_limit = local_max if oversized or title_screen is None else safe_max
+            self._resize_intentionally(
+                min(width, size_limit[0]), min(height, size_limit[1])
+            )
+
+        if title_screen is None or oversized:
+            # Recover a corrupt or disconnected saved window on one display.
+            x = max(bounds.left(), min(x, bounds.right() - self.width() + 1))
+            y = max(bounds.top(), min(y, bounds.bottom() - self.height() + 1))
+        self.move(x, y)
+        self._update_size_limits(screen, preserve_current=True)
+
     def moveEvent(self, event):
         super().moveEvent(event)
+        self._update_size_limits(preserve_current=True)
         self._schedule_pos_save()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        if self._correcting_width:
+            self._schedule_pos_save()
+            return
+        # Compact mode animates height, but only the grip or saved geometry may
+        # change the requested width. Ignore width jumps from a DPI transition.
+        if (self._preferred_width is not None
+                and not self._allow_width_change
+                and self.width() != self._preferred_width):
+            self._correcting_width = True
+            try:
+                self._update_size_limits(preserve_current=True)
+                target_width = min(self._preferred_width, self.maximumWidth())
+                self.resize(target_width, self.height())
+                if self.width() != target_width:
+                    self._preferred_width = self.width()
+            finally:
+                self._correcting_width = False
+            self._schedule_pos_save()
+            return
+        self._update_size_limits(preserve_current=True)
         self._schedule_pos_save()
 
     def set_running(self, running: bool):

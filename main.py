@@ -1845,19 +1845,12 @@ def main():
 
     overlay = SubtitleOverlay(config["subtitle"])
     if saved:
-        ox = saved.get("overlay_x")
-        oy = saved.get("overlay_y")
-        ow = saved.get("overlay_w")
-        oh = saved.get("overlay_h")
-        if ox is not None and oy is not None:
-            if SubtitleWindow._is_pos_visible(ox, oy):
-                overlay.move(ox, oy)
-            else:
-                screen = QApplication.primaryScreen()
-                geo = screen.availableGeometry()
-                overlay.move(geo.right() - overlay.width() - 20, geo.bottom() - overlay.height() - 60)
-        if ow and oh:
-            overlay.resize(ow, oh)
+        overlay.restore_geometry(
+            saved.get("overlay_x"),
+            saved.get("overlay_y"),
+            saved.get("overlay_w"),
+            saved.get("overlay_h"),
+        )
     overlay.show()
 
     # Subtitle window
@@ -1959,6 +1952,11 @@ def main():
         settings = panel.get_settings()
         pos = overlay.pos()
         size = overlay.size()
+        if not (
+            0 < size.width() <= overlay.maximumWidth()
+            and 0 < size.height() <= overlay.maximumHeight()
+        ):
+            return
         settings["overlay_x"] = pos.x()
         settings["overlay_y"] = pos.y()
         settings["overlay_w"] = size.width()
