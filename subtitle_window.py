@@ -196,7 +196,10 @@ class _SubtitleTextWidget(QWidget):
         self._update_height()
         self.update()
 
-    def set_text(self, text: str):
+    def set_text(self, text: str, immediate=False):
+        if immediate:
+            self._apply_text_immediate(text, animate=False)
+            return
         if self._text and text != self._text and self._exit_animation != "none":
             self._pending_text = text
             self._stop_all_animations()
@@ -210,7 +213,7 @@ class _SubtitleTextWidget(QWidget):
         self._pending_text = None
         self._apply_text_immediate(text)
 
-    def _apply_text_immediate(self, text: str):
+    def _apply_text_immediate(self, text: str, animate=True):
         # Stop any running animations and reset to final state
         self._stop_all_animations()
         self._content_opacity_val = 1.0
@@ -224,7 +227,7 @@ class _SubtitleTextWidget(QWidget):
         self.update()
         self.height_changed.emit()
 
-        if text:
+        if text and animate:
             self.animate_in()
 
     def _stop_all_animations(self):
@@ -496,6 +499,8 @@ class SubtitleWindow(QWidget):
     """
 
     update_text_signal = pyqtSignal(str, str)  # original, translations_json
+    caption_signal = pyqtSignal(int, int, int, str, object, bool, int)
+    reset_preview_signal = pyqtSignal(int)
     position_changed = pyqtSignal()
     window_closed = pyqtSignal()
 
@@ -504,6 +509,11 @@ class SubtitleWindow(QWidget):
         self._settings = _merge_settings(DEFAULT_SUBTITLE_WIN_SETTINGS, settings)
         self._text_widgets = []
         self._sentences = []  # [(original, {lang: text, ...}), ...]
+        self._caption_session = 0
+        self._caption_finalized = -1
+        self._preview_key = None
+        self._preview_revision = 0
+        self._preview_sentence = None
         self._drag_pos = None
         self._bg_pixmap = None
         self._click_through = bool(self._settings.get("click_through", False))
@@ -526,6 +536,8 @@ class SubtitleWindow(QWidget):
 
         self._setup_ui()
         self.update_text_signal.connect(self._on_update_text)
+        self.caption_signal.connect(self._on_caption)
+        self.reset_preview_signal.connect(self._on_reset_preview)
 
     @staticmethod
     def _is_pos_visible(x, y, margin=50):
@@ -819,6 +831,55 @@ class SubtitleWindow(QWidget):
         super().paintEvent(event)
 
     # --- Text updates ---
+    def update_caption(self, session, utterance, revision, original, translations, final, msg_id=0):
+        self.caption_signal.emit(session, utterance, revision, original, translations, final, msg_id)
+
+    def reset_preview(self, session):
+        self.reset_preview_signal.emit(session)
+
+    def _on_reset_preview(self, session):
+        if session < self._caption_session:
+            return
+        self._caption_session = session
+        self._caption_finalized = -1
+        self._preview_key = None
+        self._preview_sentence = None
+        self._preview_revision = 0
+        self._cancel_pending_segments()
+        self._refresh_display(immediate=True)
+
+    def _on_caption(self, session, utterance, revision, original, translations, final, msg_id):
+        if session < self._caption_session:
+            return
+        if session > self._caption_session:
+            self._on_reset_preview(session)
+        if utterance <= self._caption_finalized:
+            return
+        key = session, utterance
+        if not final and self._preview_key:
+            if key < self._preview_key or (key == self._preview_key and revision < self._preview_revision):
+                return
+        self._cancel_pending_segments()
+        if final:
+            self._caption_finalized = utterance
+            if self._preview_key == key:
+                self._preview_key = self._preview_sentence = None
+            if original:
+                self._sentences.append((original, dict(translations)))
+                self._sentences = self._sentences[-self._settings.get("sentences", 1):]
+        elif original:
+            if not any(translations.values()) and self._preview_key == key:
+                translations = self._preview_sentence[1]
+            self._preview_key = key
+            self._preview_revision = revision
+            self._preview_sentence = original, dict(translations)
+        elif self._preview_key == key:
+            self._preview_key = self._preview_sentence = None
+        if self._is_hidden_by_timeout and original:
+            self._restore_from_auto_hide()
+        self._refresh_display(immediate=True)
+        self._restart_auto_hide_timer()
+
     def update_text(self, original: str, translations: dict | str):
         """Thread-safe text update.
 
@@ -873,10 +934,14 @@ class SubtitleWindow(QWidget):
         self._pending_segment_timers.clear()
 
 
-    def _refresh_display(self):
-        if not self._sentences:
+    def _refresh_display(self, immediate=False):
+        sentences = list(self._sentences)
+        if self._preview_sentence:
+            sentences.append(self._preview_sentence)
+            sentences = sentences[-self._settings.get("sentences", 1):]
+        if not sentences:
             for tw in self._text_widgets:
-                tw.set_text("")
+                tw.set_text("", immediate=immediate)
             self._fit_height_snap()
             return
 
@@ -890,11 +955,11 @@ class SubtitleWindow(QWidget):
             line_type = cfg.get("type", "original")
 
             if line_type == "original":
-                texts = [s[0] for s in self._sentences if s[0]]
+                texts = [s[0] for s in sentences if s[0]]
             else:
                 lang = cfg.get("lang", "")
                 texts = []
-                for _, tl_dict in self._sentences:
+                for _, tl_dict in sentences:
                     if isinstance(tl_dict, str):
                         if tl_dict:
                             texts.append(tl_dict)
@@ -907,7 +972,11 @@ class SubtitleWindow(QWidget):
                             if v:
                                 texts.append(v)
                                 break
-            tw.set_text(" | ".join(texts) if len(texts) > 1 else (texts[0] if texts else ""))
+                if immediate and self._preview_sentence and not any(texts):
+                    wi += 1
+                    continue
+            separator = "\n" if immediate else " | "
+            tw.set_text(separator.join(texts), immediate=immediate)
             wi += 1
 
     def get_target_languages(self) -> set:
@@ -922,6 +991,7 @@ class SubtitleWindow(QWidget):
 
     def clear(self):
         self._sentences.clear()
+        self._preview_key = self._preview_sentence = None
         self._cancel_pending_segments()
         self._auto_hide_timer.stop()
         self._is_hidden_by_timeout = False

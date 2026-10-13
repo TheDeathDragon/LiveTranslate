@@ -239,6 +239,8 @@ class ChatMessage(QWidget):
         self._layout.addWidget(self._trans_label)
 
     def _build_header_html(self, s):
+        if not self._source_lang:
+            return f'<span style="color:{s["original_color"]};">{_escape(self._original)}</span>'
         if self._compact_mode:
             return (
                 f'<span style="color:#6cf;">[{self._source_lang}]</span> '
@@ -282,7 +284,7 @@ class ChatMessage(QWidget):
             self._pending_streaming = None
         s = self._current_style
         if translated:
-            if self._compact_mode:
+            if self._compact_mode or translate_ms <= 0:
                 self._trans_label.setText(
                     f'<span style="color:{s["translation_color"]};">&gt; {_escape(translated)}</span>'
                 )
@@ -886,6 +888,9 @@ class SubtitleOverlay(QWidget):
     update_translation_signal = pyqtSignal(int, str, float)
     update_streaming_signal = pyqtSignal(int, str)
     clear_signal = pyqtSignal()
+    cleared = pyqtSignal()
+    caption_signal = pyqtSignal(int, int, int, str, object, bool, int)
+    reset_preview_signal = pyqtSignal(int)
     # Monitor signals (thread-safe)
     update_monitor_signal = pyqtSignal(float, float, object)
     update_stats_signal = pyqtSignal(int, int, int, int, float)
@@ -907,6 +912,11 @@ class SubtitleOverlay(QWidget):
         super().__init__()
         self._config = config
         self._messages = {}
+        self._caption_session = 0
+        self._caption_finalized = -1
+        self._preview_message = None
+        self._preview_key = None
+        self._preview_revision = 0
         self._max_messages = 50
         self._click_through = False
         self._height_before_compact = None
@@ -922,6 +932,8 @@ class SubtitleOverlay(QWidget):
         self.update_translation_signal.connect(self._on_update_translation)
         self.update_streaming_signal.connect(self._on_update_streaming)
         self.clear_signal.connect(self._on_clear)
+        self.caption_signal.connect(self._on_caption)
+        self.reset_preview_signal.connect(self._on_reset_preview)
         self.update_monitor_signal.connect(self._on_update_monitor)
         self.update_stats_signal.connect(self._on_update_stats)
         self.update_asr_device_signal.connect(self._on_update_asr_device)
@@ -1149,6 +1161,9 @@ class SubtitleOverlay(QWidget):
         msg = ChatMessage(msg_id, timestamp, original, source_lang, asr_ms)
         self._messages[msg_id] = msg
         self._msg_layout.addWidget(msg)
+        if self._preview_message:
+            self._msg_layout.removeWidget(self._preview_message)
+            self._msg_layout.addWidget(self._preview_message)
 
         if len(self._messages) > self._max_messages:
             oldest_id = min(self._messages.keys())
@@ -1176,6 +1191,74 @@ class SubtitleOverlay(QWidget):
             self._msg_layout.removeWidget(msg)
             msg.deleteLater()
         self._messages.clear()
+        self._remove_preview()
+        self.cleared.emit()
+
+    def update_caption(self, session, utterance, revision, original, translations, final, msg_id=0):
+        self.caption_signal.emit(session, utterance, revision, original, translations, final, msg_id)
+
+    def reset_preview(self, session):
+        self.reset_preview_signal.emit(session)
+
+    def _remove_preview(self):
+        if self._preview_message:
+            self._msg_layout.removeWidget(self._preview_message)
+            self._preview_message.deleteLater()
+        self._preview_message = None
+        self._preview_key = None
+        self._preview_revision = 0
+
+    def _on_reset_preview(self, session):
+        if session < self._caption_session:
+            return
+        self._caption_session = session
+        self._caption_finalized = -1
+        self._remove_preview()
+
+    def _on_caption(self, session, utterance, revision, original, translations, final, msg_id):
+        if session < self._caption_session:
+            return
+        if session > self._caption_session:
+            self._on_reset_preview(session)
+        if utterance <= self._caption_finalized:
+            return
+        key = session, utterance
+        if not final and self._preview_key:
+            if key < self._preview_key or (key == self._preview_key and revision < self._preview_revision):
+                return
+        translated = next(iter(translations.values()), "")
+        if final:
+            self._caption_finalized = utterance
+            if self._preview_key == key:
+                self._remove_preview()
+            if original:
+                self._on_add_message(msg_id, "", original, "", 0)
+                if translated:
+                    self._on_update_translation(msg_id, translated, 0)
+                else:
+                    self._messages[msg_id].set_translation("", 0)
+                    self._messages[msg_id]._trans_label.clear()
+            return
+        if not original:
+            if self._preview_key == key:
+                self._remove_preview()
+            return
+        if self._preview_key != key:
+            self._remove_preview()
+            self._preview_message = ChatMessage(0, "", original, "", 0)
+            self._msg_layout.addWidget(self._preview_message)
+            self._preview_key = key
+        msg = self._preview_message
+        if msg._original != original:
+            if hasattr(msg, "_streaming_timer"):
+                msg._streaming_timer.stop()
+            msg._pending_streaming = None
+            msg._original = original
+            msg._header_label.setText(msg._build_header_html(msg._current_style))
+        self._preview_revision = revision
+        if translated:
+            msg.update_streaming(translated)
+        self._scroll_to_bottom()
 
     def _scroll_to_bottom(self):
         if not self._handle.auto_scroll:
@@ -1203,6 +1286,8 @@ class SubtitleOverlay(QWidget):
         ChatMessage._current_style = s
         for msg in self._messages.values():
             msg.apply_style(s)
+        if self._preview_message:
+            self._preview_message.apply_style(s)
 
     def export_messages(self, mode: str, parent=None):
         """Export captured messages to a .txt file.

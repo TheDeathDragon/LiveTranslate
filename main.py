@@ -45,6 +45,7 @@ from vad_processor import VADProcessor
 from asr_client import ASRClient, ASRWorkerError, ASRWorkerExited, ASRWorkerTimeout
 from translator import Translator, RepetitionError
 from transcript_writer import TranscriptWriter
+from live_preview import LivePreview, PreviewQueue
 
 from PyQt6.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QDialog, QMessageBox
 from PyQt6.QtGui import (
@@ -264,9 +265,14 @@ class LiveTranslateApp:
         self._last_interim_samples = 0
         self._last_interim_check_time = 0.0
         self._interim_committed_tail = ""
+        self._live_preview = False
+        self._preview_translation = False
+        self._preview = LivePreview(self._publish_caption, self._preview_usage)
+        self._preview_settings = None
 
     def set_overlay(self, overlay: SubtitleOverlay):
         self._overlay = overlay
+        overlay.cleared.connect(self._invalidate_preview)
 
     def set_subtitle_window(self, subwin: SubtitleWindow):
         self._subwin = subwin
@@ -282,6 +288,16 @@ class LiveTranslateApp:
             self._overlay.set_models(models, active_idx)
 
     def _on_settings_changed(self, settings):
+        signature = tuple(settings.get(k) for k in (
+            "live_preview", "asr_language", "asr_engine", "asr_device",
+            "funasr_model", "whisper_model_size", "audio_device", "mic_device",
+            "target_language", "system_prompt", "hub",
+            "sensevoice_pad_seconds", "whisper_pad_seconds"))
+        if self._preview_settings is not None and signature != self._preview_settings:
+            self._invalidate_preview()
+        self._preview_settings = signature
+        self._live_preview = bool(settings.get("live_preview", False))
+        self._asr_queue.maxsize = 0 if self._live_preview else 16
         self._vad.update_settings(settings)
         if "style" in settings and self._overlay:
             self._overlay.apply_style(settings["style"])
@@ -449,6 +465,8 @@ class LiveTranslateApp:
             raise
 
     def _on_target_language_changed(self, lang: str):
+        if lang != self._target_language:
+            self._invalidate_preview()
         self._target_language = lang
         log.info(f"Target language: {lang}")
         if self._translator:
@@ -461,6 +479,8 @@ class LiveTranslateApp:
             _save_settings(settings)
 
     def _on_model_changed(self, model_config: dict):
+        self._invalidate_preview()
+        self._preview_translation = bool(model_config.get("preview_translation", False))
         log.info(
             f"Switching translator: {model_config['name']} ({model_config['model']})"
         )
@@ -1168,7 +1188,9 @@ class LiveTranslateApp:
             return
         n = len(self._subwin.get_target_languages()) if self._subwin else 1
         self._tl_executor = ThreadPoolExecutor(max_workers=max(8, n + 1))
-        self._asr_queue = queue.Queue(maxsize=16)
+        self._asr_queue = PreviewQueue(maxsize=0 if self._live_preview else 16)
+        self._preview.start()
+        self._invalidate_preview()
         self._running = True
         self._paused = False
         self._audio.start()
@@ -1199,6 +1221,8 @@ class LiveTranslateApp:
         if self._capture_thread:
             self._capture_thread.join(timeout=3)
             self._capture_thread = None
+        if isinstance(self._asr_queue, PreviewQueue):
+            self._asr_queue.discard_preview()
         self._asr_queue.put(None)
         if self._asr_thread:
             self._asr_thread.join(timeout=10)
@@ -1206,7 +1230,11 @@ class LiveTranslateApp:
                 log.warning("ASR thread still running after timeout, proceeding with cleanup")
             self._asr_thread = None
         # Flush remaining VAD buffer after pipeline threads are done
-        if self._interim_active:
+        if self._live_preview:
+            remaining = self._vad.flush()
+            if remaining is not None and self._asr_ready:
+                self._process_preview_audio(self._preview.frame(remaining, final=True))
+        elif self._interim_active:
             remaining = self._vad.force_flush()
             if remaining is not None and self._asr_ready:
                 self._process_interim_final(remaining)
@@ -1219,6 +1247,8 @@ class LiveTranslateApp:
         self._last_interim_samples = 0
         self._last_interim_check_time = 0.0
         self._interim_committed_tail = ""
+        self._preview.stop()
+        self._invalidate_preview()
         self._tl_executor.shutdown(wait=True)
         self._transcript.close()
         if self._mem_periodic_timer is not None:
@@ -1239,6 +1269,7 @@ class LiveTranslateApp:
 
     def pause(self):
         self._paused = True
+        self._invalidate_preview()
         self._interim_active = False
         self._interim_pending = ""
         self._last_interim_samples = 0
@@ -1352,6 +1383,70 @@ class LiveTranslateApp:
                 log.warning("Translation executor shut down, skipping")
 
     # ── Incremental ASR ──
+
+    def _invalidate_preview(self):
+        if not hasattr(self, "_preview"):
+            return
+        session = self._preview.invalidate()
+        if self._live_preview:
+            with self._vad_lock:
+                self._vad._reset()
+        self._last_interim_check_time = 0.0
+        for window in (self._overlay, self._subwin):
+            if window:
+                window.reset_preview(session)
+
+    def _preview_usage(self, prompt_tokens, completion_tokens):
+        self._total_prompt_tokens += prompt_tokens
+        self._total_completion_tokens += completion_tokens
+
+    def _publish_caption(self, frame, original, translations, asr_ms, tl_ms, phase):
+        final = phase == "final"
+        translation = translations.get(self._target_language, "")
+        if final and original:
+            self._msg_id += 1
+            self._asr_count += 1
+            self._translate_count += bool(translation)
+            stamp = datetime.fromtimestamp(time.time()).strftime("%H:%M:%S")
+            self._transcript.write_original(self._msg_id, stamp, original)
+            if translation:
+                self._transcript.write_translation(self._msg_id, translation)
+            else:
+                self._transcript.finalize_no_translation(self._msg_id)
+            log.info("Caption final [%s:%s] ASR=%.0fms TL=%.0fms", frame.session,
+                     frame.utterance, asr_ms, tl_ms)
+        for window in (self._overlay, self._subwin):
+            if window:
+                window.update_caption(frame.session, frame.utterance, frame.revision,
+                                      original, translations, final,
+                                      self._msg_id if final and original else 0)
+        if self._overlay:
+            self._overlay.update_stats(self._asr_count, self._translate_count,
+                                      self._total_prompt_tokens, self._total_completion_tokens,
+                                      self._compute_cost())
+
+    def _process_preview_audio(self, frame):
+        if not self._preview.valid(frame):
+            return
+        text, language, asr_ms = "", "unknown", 0
+        try:
+            result, asr_ms = self._run_asr(
+                frame.audio, "preview_final" if frame.final else "preview")
+            if not self._preview.valid(frame):
+                return
+            if result:
+                text = result["text"].strip()
+                language = result["language"]
+                expected = self._panel.get_settings().get("asr_language", "auto") if self._panel else "auto"
+                if (not any(c.isalnum() for c in text) or
+                        (expected != "auto" and language != expected) or
+                        (len(frame.audio) / 16000 >= 2 and sum(c.isalnum() for c in text) <= 3)):
+                    text = ""
+        except Exception:
+            log.exception("Preview ASR failed")
+        extras = self._subwin.get_target_languages() - {language, self._target_language} if self._subwin and self._subwin.isVisible() else ()
+        self._preview.submit(frame, text, language, asr_ms, self._translator,
+                             self._target_language, self._preview_translation, extras)
 
     _segmenter_cache = {}  # lang -> yasbd pysbd_adapter.Segmenter
 
@@ -1636,8 +1731,9 @@ class LiveTranslateApp:
                     for _ in range(n):
                         with self._vad_lock:
                             seg = self._vad.process_chunk(silence_chunk)
+                            frame = self._preview.frame(seg, final=True) if seg is not None and self._live_preview else None
                         if seg is not None and self._asr_ready:
-                            self._enqueue_asr("vad_flush", seg)
+                            self._enqueue_asr("preview_final" if frame else "vad_flush", frame if frame else seg)
                             break
                 continue
 
@@ -1653,6 +1749,19 @@ class LiveTranslateApp:
 
             with self._vad_lock:
                 speech_segment = self._vad.process_chunk(chunk)
+                if self._live_preview and self._asr_ready:
+                    if speech_segment is not None:
+                        frame = self._preview.frame(speech_segment, final=True)
+                        self._enqueue_asr("preview_final", frame)
+                        self._last_interim_check_time = 0.0
+                    else:
+                        peek = self._vad.peek_buffer()
+                        now = time.monotonic()
+                        if (peek is not None and peek[1] >= max(1.0, self._interim_interval) and
+                                now - self._last_interim_check_time >= self._interim_interval):
+                            self._last_interim_check_time = now
+                            self._enqueue_asr("preview", self._preview.frame(peek[0]))
+                    continue
 
             if speech_segment is None:
                 # Still accumulating — check for interim ASR
@@ -1689,7 +1798,7 @@ class LiveTranslateApp:
                 log.warning("ASR queue still full after drop, skipping segment")
 
     def _asr_loop(self):
-        while self._running:
+        while self._running or not self._asr_queue.empty():
             try:
                 item = self._asr_queue.get(timeout=1.0)
             except queue.Empty:
@@ -1706,6 +1815,12 @@ class LiveTranslateApp:
                 break
 
             seg_type, segment = item
+
+            if seg_type in ("preview", "preview_final"):
+                self._process_preview_audio(segment)
+                continue
+            if self._live_preview:
+                continue
 
             if seg_type == "vad_flush":
                 if self._interim_active:

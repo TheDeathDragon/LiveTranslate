@@ -142,6 +142,16 @@ class AudioCapture:
 
     def _open_stream(self):
         """Open stream for current default loopback device."""
+        if (self._device_name or "").startswith("__process__:"):
+            from process_audio import ProcessStream
+            self._close_mic_stream()
+            self._mic_device_name = None
+            self._mic_buf = np.array([], dtype=np.float32)
+            self._stream = ProcessStream(self._device_name.split(":", 1)[1])
+            self._native_channels = self._stream.channels
+            self._native_rate = self._stream.rate
+            self._current_device_name = self._device_name
+            return
         loopback_dev = self._find_loopback_device()
         self._native_channels = loopback_dev["maxInputChannels"]
         self._native_rate = int(loopback_dev["defaultSampleRate"])
@@ -223,6 +233,8 @@ class AudioCapture:
 
     def set_mic_device(self, device_name):
         """Change mic device at runtime. None = disabled."""
+        if (self._device_name or "").startswith("__process__:"):
+            device_name = None
         if device_name == self._mic_device_name:
             return
         log.info(f"Mic device changed: {self._mic_device_name} -> {device_name}")
@@ -235,10 +247,16 @@ class AudioCapture:
         if device_name == self._device_name:
             return
         log.info(f"Audio device changed: {self._device_name} -> {device_name}")
-        self._device_name = device_name
-        self._loopback_disabled = device_name == "__disabled__"
-        if self._running:
-            self._restart_event.set()
+        with self._lock:
+            self._device_name = device_name
+            self._loopback_disabled = device_name == "__disabled__"
+            while not self.audio_queue.empty():
+                try:
+                    self.audio_queue.get_nowait()
+                except queue.Empty:
+                    break
+            if self._running:
+                self._restart_event.set()
 
     def _resample_to_mono(self, data, native_channels, native_rate):
         """Convert raw bytes to mono float32 at self.sample_rate."""
@@ -334,6 +352,7 @@ class AudioCapture:
                         log.warning(f"Device check error: {e}")
 
             # Read loopback chunk or generate silence for mic-only mode
+            source_name = self._device_name
             loopback_audio = None
             if self._loopback_disabled:
                 time.sleep(self.chunk_duration)
@@ -347,6 +366,8 @@ class AudioCapture:
                         if not self._stream:
                             time.sleep(0.005)
                             continue
+                        if getattr(self._stream, "error", None):
+                            raise self._stream.error
                         if self._stream.get_read_available() >= native_chunk:
                             data = self._stream.read(
                                 native_chunk, exception_on_overflow=False
@@ -357,6 +378,10 @@ class AudioCapture:
                         )
                 except Exception as e:
                     if self._restart_event.is_set():
+                        continue
+                    if (self._device_name or "").startswith("__process__:"):
+                        log.error(f"Browser capture stopped without fallback: {e}")
+                        self._close_stream()
                         continue
                     log.warning(f"Read error (device may have changed): {e}")
                     try:
@@ -402,11 +427,18 @@ class AudioCapture:
                 mic_rms = float(np.sqrt(np.mean(mic_chunk**2)))
                 audio = loopback_audio + mic_chunk
 
-            try:
-                self.audio_queue.put_nowait((audio, mic_rms))
-            except queue.Full:
-                self.audio_queue.get_nowait()
-                self.audio_queue.put_nowait((audio, mic_rms))
+            with self._lock:
+                # Discard an in-flight chunk when the selected source changes.
+                if self._restart_event.is_set() or source_name != self._device_name:
+                    continue
+                try:
+                    self.audio_queue.put_nowait((audio, mic_rms))
+                except queue.Full:
+                    try:
+                        self.audio_queue.get_nowait()
+                    except queue.Empty:
+                        pass
+                    self.audio_queue.put_nowait((audio, mic_rms))
 
     def start(self):
         self._loopback_disabled = self._device_name == "__disabled__"

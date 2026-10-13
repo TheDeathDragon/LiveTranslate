@@ -27,6 +27,7 @@ Works with any system audio — videos, livestreams, voice chat. No player modif
 - **Streaming translation display**: Real-time character-by-character translation output
 - **Per-model settings**: Streaming, structured output (JSON), context history, disable thinking
 - **Microphone mix-in**: Optionally mix microphone input with system audio for ASR
+- **Browser-only audio**: Chrome or Sogou application capture, excluding other apps and microphone input
 - **Low-latency VAD**: 32ms chunks + Silero VAD with adaptive silence detection
 - **Transparent overlay**: Always-on-top, click-through, draggable, 14 color themes
 - **CUDA acceleration**: GPU-accelerated ASR inference
@@ -104,6 +105,45 @@ Settings → Translation tab:
 | API Key | Your key |
 | Model | `deepseek-chat` |
 | Proxy | `none` / `system` / custom URL |
+
+## Browser-only audio
+
+In Settings → VAD / ASR → Audio, select **Chrome audio only** or **Sogou browser audio only** to watch a stream while using a separate voice-chat app. These modes disable microphone capture and never fall back to system audio. The existing system/default-device and microphone modes remain available.
+
+The capture target is the browser's actual Windows audio-session process (including Sogou audio children), with its process tree. A paused session remains selectable; closing and reopening the browser reconnects automatically. If more than one browser audio process is active, capture stops with a log message: close or pause the other instance, then restart capture. This does not isolate one tab or window; tabs sharing the selected audio process are included. Voice chat in the same browser may therefore also be included.
+
+Requires Windows application-loopback support. Verified on fully patched Windows 10 22H2 (build 19045); unavailable APIs fail without capturing another audio source. It uses the existing dependencies and adds no external audio-routing tool.
+
+Deterministic browser selection, Qt settings and failure-path checks:
+
+```bash
+python -m pytest tests/test_browser_audio.py
+```
+
+An optional native check plays two quiet synthetic tones in separate processes on the default output and verifies that only the selected process is captured. It requires an audible Windows output device and does not run by default (PowerShell):
+
+```powershell
+$env:LIVETRANSLATE_TEST_NATIVE_AUDIO = "1"
+python -m pytest tests/test_browser_audio_native.py -s
+```
+
+## Live subtitle preview (opt-in)
+
+Enable **Live subtitle preview** in the ASR/VAD settings to revise the current caption while speech continues. Enable **Translate provisional subtitles** separately for each translation model. Both options default to off; cloud preview translation makes additional requests and may incur charges.
+
+The existing interim interval also controls preview checks (0.5–10 seconds). Preview starts after buffering at least one second or the chosen interval, whichever is longer. A 0.7-second interval favors speed; 1.5 seconds gives the first preview more context and reduces revisions. This is a check interval, not a guaranteed subtitle latency. Keep the source language fixed when it is known.
+
+Preview uses an immutable copy of the current audio buffer. It does not trim audio or commit half-sentences. Final VAD segments retain priority; pending ASR and translation previews are replaced by newer previews. Provisional text changes in place, including in the standalone subtitle window, without its minimum-display delay or transition animations. Only final text enters transcript files, exported message history, and translation context.
+
+For a rolling display, set the standalone subtitle window to two sentences. Live captions show the preceding confirmed sentence and the current provisional sentence on separate lines. The visible translation remains while its replacement is being computed; a failed final translation does not retain provisional text as a confirmed result. Current sentences remain revisable, including changes to their word order.
+
+Pause, Clear, and model/language/device changes invalidate pending previews. An identical completed preview translation can be reused for the final result. Failed translations are not retried by the preview pipeline. This remains repeated inference with an existing ASR model, rather than a native streaming decoder.
+
+Regression checks require the existing app dependencies and pytest:
+
+```bash
+python -m pytest tests/test_live_preview.py tests/test_preview_widgets.py tests/test_preview_integration.py
+```
 
 ## Architecture
 

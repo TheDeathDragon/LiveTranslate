@@ -515,6 +515,8 @@ class ModelEditDialog(QDialog):
         self._streaming = QCheckBox(t("streaming"))
         self._streaming.setToolTip(t("streaming_hint"))
         self._streaming.setChecked(True)
+        self._preview_translation = QCheckBox(t("label_preview_translation"))
+        self._preview_translation.setToolTip(t("preview_translation_hint"))
         self._json_response = QCheckBox(t("json_response"))
         self._json_response.setToolTip(t("json_response_hint"))
         self._context_turns = QSpinBox()
@@ -550,6 +552,7 @@ class ModelEditDialog(QDialog):
         layout.addRow(t("label_context_turns"), self._context_turns)
         layout.addRow(t("label_thinking"), self._thinking_style)
         layout.addRow("", self._streaming)
+        layout.addRow("", self._preview_translation)
         layout.addRow("", self._json_response)
         layout.addRow("", self._no_system_role)
 
@@ -642,6 +645,7 @@ class ModelEditDialog(QDialog):
             if style_idx >= 0:
                 self._thinking_style.setCurrentIndex(style_idx)
             self._streaming.setChecked(model_data.get("streaming", True))
+            self._preview_translation.setChecked(model_data.get("preview_translation", False))
             self._json_response.setChecked(model_data.get("json_response", False))
             self._context_turns.setValue(model_data.get("context_turns", 0))
             self._input_price.setValue(model_data.get("input_price", 0))
@@ -732,6 +736,8 @@ class ModelEditDialog(QDialog):
             result["thinking_style"] = thinking_style
         if not self._streaming.isChecked():
             result["streaming"] = False
+        if self._preview_translation.isChecked():
+            result["preview_translation"] = True
         if self._json_response.isChecked():
             result["json_response"] = True
         if self._context_turns.value() > 0:
