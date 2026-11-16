@@ -874,9 +874,12 @@ class LiveTranslateApp:
             self._log_mem_after_asr(f"{kind}:error", audio_seconds, asr_ms)
             raise
         with self._asr_lock:
-            if self._asr is client:
-                self._asr_error_count = 0
-                self._asr_restart_count = 0
+            if self._asr is not client:
+                # An engine switch replaced this worker while the request was in
+                # flight; its result belongs to the old engine.
+                return None, 0.0
+            self._asr_error_count = 0
+            self._asr_restart_count = 0
         asr_ms = (time.perf_counter() - asr_start) * 1000
         self._log_mem_after_asr(kind, audio_seconds, asr_ms)
         return result, asr_ms
