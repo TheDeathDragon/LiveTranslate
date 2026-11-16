@@ -21,7 +21,7 @@ Works with any system audio — videos, livestreams, voice chat. No player modif
 ## Features
 
 - **Real-time pipeline**: System audio → VAD → ASR → LLM translation → overlay
-- **Multiple ASR engines**: faster-whisper, SenseVoice, FunASR Nano, Anime-Whisper
+- **Multiple ASR engines**: faster-whisper, SenseVoice, FunASR Nano, Anime-Whisper, Qwen3-ASR, BuzzASR Korean
 - **Remote ASR**: offload speech recognition to a GPU machine over HTTP — see [REMOTE_ASR.md](REMOTE_ASR.md)
 - **Any OpenAI-compatible API**: DeepSeek, Grok, Qwen, GPT, Ollama, vLLM, etc.
 - **Streaming translation display**: Real-time character-by-character translation output
@@ -121,6 +121,7 @@ main.py                 Entry point & pipeline
 ├── asr_sensevoice.py   SenseVoice backend
 ├── asr_funasr_nano.py  FunASR Nano backend
 ├── asr_anime_whisper.py Anime-Whisper backend (ja anime/galgame)
+├── asr_qwen3.py        Qwen3-ASR backend (transformers, multilingual)
 ├── asr_remote.py        Remote Whisper client (→ asr_server.py, see REMOTE_ASR.md)
 ├── translator.py       OpenAI-compatible client (streaming, JSON schema, context)
 ├── model_manager.py    Model download & cache
@@ -135,6 +136,8 @@ main.py                 Entry point & pipeline
 - [faster-whisper](https://github.com/SYSTRAN/faster-whisper) — Whisper inference via CTranslate2
 - [FunASR](https://github.com/modelscope/FunASR) — SenseVoice / Fun-ASR-Nano
 - [Anime-Whisper](https://huggingface.co/litagin/anime-whisper) — Japanese anime/galgame ASR
+- [Qwen3-ASR](https://huggingface.co/Qwen/Qwen3-ASR-1.7B-hf) — Multilingual ASR via transformers
+- [BuzzASR](https://huggingface.co/BuzzASR/korean) — Korean ASR
 - [Silero VAD](https://github.com/snakers4/silero-vad) — Voice activity detection
 
 ## Star History

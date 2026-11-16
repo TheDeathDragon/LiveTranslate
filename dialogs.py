@@ -29,7 +29,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from model_manager import download_asr, download_silero
+from model_manager import ASR_ENGINE_PROFILES, download_asr, download_silero
 from i18n import t, get_lang
 
 log = logging.getLogger("LiveTranslate.Dialogs")
@@ -431,6 +431,8 @@ class ModelDownloadDialog(QDialog):
             for m in self._missing:
                 if m["type"] == "silero-vad":
                     download_silero(proxy=self._proxy)
+                elif m["type"] in ASR_ENGINE_PROFILES:
+                    download_asr(m["type"], hub=self._hub, proxy=self._proxy)
                 elif m["type"] in (
                     "sensevoice",
                     "funasr-nano",

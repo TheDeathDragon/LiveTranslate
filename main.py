@@ -24,6 +24,7 @@ from model_manager import (
     get_missing_models,
     is_asr_cached,
     ASR_DISPLAY_NAMES,
+    ASR_ENGINE_PROFILES,
     MODELS_DIR,
     local_faster_whisper_display_name,
     migrate_funasr_settings,
@@ -388,7 +389,8 @@ class LiveTranslateApp:
         recycle does not revert a runtime override to the engine-switch-time value."""
         with self._asr_pending_lock:
             language = self._asr_pending_language
-            pad_seconds = self._asr_pending_padding.get(asr_type, _NO_PENDING)
+            pad_key = "funasr" if asr_type == "funasr" else "whisper"
+            pad_seconds = self._asr_pending_padding.get(pad_key, _NO_PENDING)
         if language is not _NO_PENDING:
             try:
                 client.set_language(language)
@@ -403,17 +405,17 @@ class LiveTranslateApp:
                 except ASRWorkerError as exc:
                     log.warning(f"ASR padding update failed: {exc}")
                 self._update_restart_config(pad_seconds=pad_seconds)
-            self._clear_pending_padding(asr_type, pad_seconds)
+            self._clear_pending_padding(pad_key, pad_seconds)
 
     def _clear_pending_language(self, language):
         with self._asr_pending_lock:
             if self._asr_pending_language is language:
                 self._asr_pending_language = _NO_PENDING
 
-    def _clear_pending_padding(self, asr_type, pad_seconds):
+    def _clear_pending_padding(self, key, pad_seconds):
         with self._asr_pending_lock:
-            if self._asr_pending_padding.get(asr_type) == pad_seconds:
-                del self._asr_pending_padding[asr_type]
+            if self._asr_pending_padding.get(key) == pad_seconds:
+                del self._asr_pending_padding[key]
 
     def _update_restart_config(self, **kwargs):
         with self._asr_lock:
@@ -520,6 +522,9 @@ class LiveTranslateApp:
                 cache_model_key = model_path
         elif engine_type == "funasr":
             cache_model_key = funasr_model
+        elif engine_type in ASR_ENGINE_PROFILES:
+            # Profile engines take no size argument; the key is the identity.
+            cache_model_key = engine_type
 
         remote_asr_url = settings.get(
             "remote_asr_url",
@@ -562,7 +567,12 @@ class LiveTranslateApp:
         self._vad._reset()
 
         cached = is_asr_cached(engine_type, cache_model_key, hub)
-        display_name = ASR_DISPLAY_NAMES.get(engine_type, engine_type)
+        profile = ASR_ENGINE_PROFILES.get(engine_type)
+        display_name = (
+            profile["display_name"]
+            if profile
+            else ASR_DISPLAY_NAMES.get(engine_type, engine_type)
+        )
         if engine_type == "whisper":
             display_model = (
                 local_faster_whisper_display_name(model_size)
@@ -598,6 +608,7 @@ class LiveTranslateApp:
                     self._config["asr"].get("whisper_pad_seconds", 0.5),
                 )
                 if engine_type == "whisper"
+                or (profile and profile["supports_padding"])
                 else None
             ),
             "download_root": str((MODELS_DIR / "huggingface" / "hub").resolve()),
@@ -793,22 +804,12 @@ class LiveTranslateApp:
                 )
             except Exception:
                 worker_rss_mb = 0.0
-        gpu_alloc_mb = 0.0
-        gpu_reserved_mb = 0.0
-        try:
-            if torch.cuda.is_available():
-                gpu_alloc_mb = torch.cuda.memory_allocated() / 1024 / 1024
-                gpu_reserved_mb = torch.cuda.memory_reserved() / 1024 / 1024
-        except Exception:
-            pass
         msgs = len(self._overlay._messages) if self._overlay else 0
         vad_buf = len(self._vad._speech_buffer)
         return {
             "rss": rss_mb,
             "worker_rss": worker_rss_mb,
             "total_rss": rss_mb + worker_rss_mb,
-            "gpu_alloc": gpu_alloc_mb,
-            "gpu_reserved": gpu_reserved_mb,
             "msgs": msgs,
             "vad_buf": vad_buf,
         }
@@ -823,7 +824,6 @@ class LiveTranslateApp:
             f"MEM[asr#{self._mem_asr_call_count}:{kind}] RSS={snap['rss']:.1f}MB "
             f"(Δ{delta:+.2f} since last, {total_delta:+.1f} since start) "
             f"worker_rss={snap['worker_rss']:.0f}MB "
-            f"GPU(main alloc/reserved)={snap['gpu_alloc']:.0f}/{snap['gpu_reserved']:.0f}MB "
             f"audio={audio_seconds:.1f}s asr={asr_ms:.0f}ms "
             f"outputs={self._asr_count} msgs={snap['msgs']} vad_buf={snap['vad_buf']}"
         )
@@ -1065,7 +1065,6 @@ class LiveTranslateApp:
         log.info(
             f"MEM[tick] RSS={snap['rss']:.1f}MB ({total_delta:+.1f} since start) "
             f"worker_rss={snap['worker_rss']:.0f}MB "
-            f"GPU(main alloc/reserved)={snap['gpu_alloc']:.0f}/{snap['gpu_reserved']:.0f}MB "
             f"msgs={snap['msgs']} asr_calls={self._mem_asr_call_count} "
             f"asr_count={self._asr_count} tl_count={self._translate_count}"
         )
@@ -1188,7 +1187,6 @@ class LiveTranslateApp:
         snap = self._mem_snapshot()
         log.info(
             f"MEM[start] RSS={snap['rss']:.1f}MB "
-            f"GPU(alloc/reserved)={snap['gpu_alloc']:.0f}/{snap['gpu_reserved']:.0f}MB "
             f"(baseline for delta tracking)"
         )
         log.info("Pipeline started (capture + ASR threads)")
@@ -1231,7 +1229,6 @@ class LiveTranslateApp:
         total_delta = snap["rss"] - self._mem_baseline_mb
         log.info(
             f"MEM[stop] RSS={snap['rss']:.1f}MB ({total_delta:+.1f} since start) "
-            f"GPU(alloc/reserved)={snap['gpu_alloc']:.0f}/{snap['gpu_reserved']:.0f}MB "
             f"asr_calls={self._mem_asr_call_count} outputs={self._asr_count}"
         )
         self._shutdown_asr_worker()
@@ -1251,6 +1248,15 @@ class LiveTranslateApp:
     def resume(self):
         self._paused = False
         log.info("Pipeline resumed")
+
+    def _expected_asr_language(self) -> str:
+        """Language the pipeline expects from ASR; a locked engine overrides the panel."""
+        setting = self._panel.get_settings().get("asr_language", "auto") if self._panel else "auto"
+        profile = ASR_ENGINE_PROFILES.get(self._asr_type or "") or {}
+        expected = profile.get("language_locked") or setting
+        if expected in profile.get("unsupported_languages", ()):
+            return "auto"
+        return expected
 
     def _process_segment(self, speech_segment):
         """Run ASR + translation on a speech segment. Called from ASR thread and stop()."""
@@ -1286,10 +1292,10 @@ class LiveTranslateApp:
             return
 
         source_lang = result["language"]
-        asr_lang_setting = self._panel.get_settings().get("asr_language", "auto") if self._panel else "auto"
-        if asr_lang_setting != "auto" and source_lang != asr_lang_setting:
+        expected_lang = self._expected_asr_language()
+        if expected_lang != "auto" and source_lang != expected_lang:
             log.info(
-                f"Language filter: expected '{asr_lang_setting}' but got '{source_lang}', "
+                f"Language filter: expected '{expected_lang}' but got '{source_lang}', "
                 f"discarding: {original_text[:60]}"
             )
             return
@@ -1532,9 +1538,9 @@ class LiveTranslateApp:
         if not original_text or not any(c.isalnum() for c in original_text):
             return
 
-        asr_lang_setting = self._panel.get_settings().get("asr_language", "auto") if self._panel else "auto"
-        if asr_lang_setting != "auto" and source_lang != asr_lang_setting:
-            log.info(f"Language filter: expected '{asr_lang_setting}' but got '{source_lang}', discarding: {original_text[:60]}")
+        expected_lang = self._expected_asr_language()
+        if expected_lang != "auto" and source_lang != expected_lang:
+            log.info(f"Language filter: expected '{expected_lang}' but got '{source_lang}', discarding: {original_text[:60]}")
             return
 
         self._asr_count += 1

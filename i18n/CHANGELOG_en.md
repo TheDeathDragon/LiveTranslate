@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-11-17
+- New Qwen3-ASR 1.7B engine: native transformers implementation with 30 languages plus auto-detect, ~4.1GB of VRAM, better Japanese and Korean accuracy than Whisper
+- New BuzzASR Korean engine: Korean-specific, weights converted to CTranslate2 float16 and served through the existing Whisper inference path
+
 ## 2026-08-17
 - Incremental ASR sentence segmentation switched from PySBD to yasbd-lib (#37): API-compatible with no behavior change, adds native rules for Korean and 16 more languages (Korean previously fell back to English rules), and is much faster on long text
 - Fixed empty translations showing up as untranslated same-language text with DeepSeek (#38): DeepSeek defaults to thinking mode ON and only accepts thinking.type=disabled to turn it off, while the previously sent enable_thinking=false is a Qwen-style flag it ignores; the model edit dialog now has a "Disable thinking" style selector (auto-detect / DeepSeek·Volcano Ark·GLM / Qwen·DashScope·SiliconFlow / self-hosted vLLM·SGLang / OpenAI·Grok reasoning_effort / do not send), auto-detect no longer sends unknown parameters to official OpenAI-style endpoints that reject them, and a diagnostic warning is logged when reasoning burns the whole token budget and returns an empty completion

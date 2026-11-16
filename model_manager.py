@@ -1,5 +1,6 @@
 import os
 import contextlib
+import json
 import logging
 from pathlib import Path
 
@@ -121,11 +122,58 @@ ASR_MODEL_IDS_HF = {
     "sensevoice": "FunAudioLLM/SenseVoiceSmall",
 }
 
+# Engines outside the funasr profile table. `cache_layout` says what the
+# download step leaves behind: raw hub weights ("hub") or a CTranslate2
+# conversion under models/ct2 ("ct2"). The loader is picked in asr_worker
+# from the engine key itself.
+ASR_ENGINE_PROFILES = {
+    "qwen3-asr": {
+        "display_name": "Qwen3-ASR 1.7B",
+        # The -hf repo stores `model.*` weights and a chat template that keeps
+        # assistant messages. The plain repo targets the qwen-asr package: its
+        # `thinker.*` weights do not match transformers' Qwen3ASRModel.
+        "modelscope_id": "Qwen/Qwen3-ASR-1.7B-hf",
+        "huggingface_id": "Qwen/Qwen3-ASR-1.7B-hf",
+        "estimated_bytes": 4_100_000_000,
+        "cache_layout": "hub",
+        "language_locked": None,
+        # UI offers these but the model has no code for them, so it falls back
+        # to auto-detect instead of failing.
+        "unsupported_languages": ("uk", "no", "he"),
+        "supports_padding": False,
+    },
+    "buzzasr-korean": {
+        "display_name": "BuzzASR Korean",
+        "modelscope_id": None,
+        "huggingface_id": "BuzzASR/korean",
+        "estimated_bytes": 3_100_000_000,
+        "cache_layout": "ct2",
+        "language_locked": "ko",
+        "unsupported_languages": (),
+        "supports_padding": True,
+    },
+}
+
+# Converted CTranslate2 models live beside the hub caches, not inside them.
+CT2_MODELS_DIR = MODELS_DIR / "ct2"
+
+
+def ct2_model_dir(engine_type: str):
+    """Directory holding the CTranslate2 conversion of `engine_type`."""
+    return CT2_MODELS_DIR / engine_type
+
 
 def asr_model_id(
     engine_type: str, hub: str = "ms", funasr_model: str | None = None
 ) -> str:
     """Return the repo id for an engine on the given hub ('ms' or 'hf')."""
+    profile = ASR_ENGINE_PROFILES.get(engine_type)
+    if profile:
+        # HF-only engines fall back to the HF id for both hubs so callers can
+        # always split the result into org/name.
+        if hub == "hf":
+            return profile["huggingface_id"]
+        return profile["modelscope_id"] or profile["huggingface_id"]
     if engine_type == "funasr":
         return funasr_model_id(funasr_model, hub)
     if engine_type in FUNASR_LEGACY_ENGINE_ALIASES:
@@ -133,6 +181,7 @@ def asr_model_id(
     if hub == "hf" and engine_type in ASR_MODEL_IDS_HF:
         return ASR_MODEL_IDS_HF[engine_type]
     return ASR_MODEL_IDS[engine_type]
+
 
 ASR_DISPLAY_NAMES = {
     "funasr": "FunASR",
@@ -164,6 +213,8 @@ _CACHE_MODELS = [
     ("Fun-ASR-Nano", "funasr", "funasr-nano-2512"),
     ("Fun-ASR-MLT-Nano", "funasr", "funasr-mlt-nano-2512"),
     ("Anime-Whisper", "anime-whisper"),
+    ("Qwen3-ASR 1.7B", "qwen3-asr"),
+    ("BuzzASR Korean", "buzzasr-korean"),
 ]
 
 
@@ -241,6 +292,20 @@ def is_faster_whisper_model_dir(path) -> bool:
         path.is_dir()
         and (path / "model.bin").is_file()
         and (path / "config.json").is_file()
+    )
+
+
+def ct2_model_complete(path) -> bool:
+    """True when a produced CTranslate2 directory has every file faster-whisper
+    reads at load time. A missing tokenizer or preprocessor config sends it to
+    the hub and falls back to 80 mels, which breaks large-v3 derived models.
+    """
+    if not is_faster_whisper_model_dir(path):
+        return False
+    path = Path(path)
+    return all(
+        (path / name).is_file()
+        for name in ("tokenizer.json", "preprocessor_config.json")
     )
 
 
@@ -397,7 +462,61 @@ def _hf_repo_complete(org: str, name: str, min_bytes: int = 50_000_000) -> bool:
     return False
 
 
+def _weights_complete(model_dir: Path) -> bool:
+    """True when every weight shard of a Transformers checkpoint exists.
+
+    A sharded checkpoint lists its files in model.safetensors.index.json;
+    checking only "some .safetensors exists" accepts a download that aborted
+    after the first shard. A damaged index counts as incomplete, so the
+    download step repairs it instead of the loader failing.
+    """
+    index = model_dir / "model.safetensors.index.json"
+    if index.is_file():
+        try:
+            weight_map = json.loads(index.read_text(encoding="utf-8"))["weight_map"]
+        except (OSError, ValueError, KeyError):
+            return False
+        return bool(weight_map) and all(
+            (model_dir / fn).is_file() for fn in set(weight_map.values())
+        )
+    return any(
+        (model_dir / fn).is_file()
+        for fn in ("model.safetensors", "pytorch_model.bin")
+    )
+
+
+def _complete_model_dir(path: Path) -> bool:
+    """True when a model directory holds a config and every weight shard."""
+    return (path / "config.json").is_file() and _weights_complete(path)
+
+
+def _snapshot_complete(model_id: str) -> bool:
+    """True when any snapshot of `model_id` holds a complete model."""
+    org, name = model_id.split("/")
+    snap_root = (
+        MODELS_DIR / "huggingface" / "hub" / f"models--{org}--{name}" / "snapshots"
+    )
+    if not snap_root.exists():
+        return False
+    return any(
+        snap.is_dir() and _complete_model_dir(snap) for snap in snap_root.iterdir()
+    )
+
+
 def is_asr_cached(engine_type, model_size="medium", hub="ms") -> bool:
+    profile = ASR_ENGINE_PROFILES.get(engine_type)
+    if profile:
+        if profile["cache_layout"] == "ct2":
+            # The converted dir is the only thing ASREngine can load; a bare
+            # hub snapshot means the conversion step never finished.
+            return ct2_model_complete(ct2_model_dir(engine_type))
+        # Accept cache from either hub, same rule as the funasr branch below.
+        ms_id = profile["modelscope_id"]
+        if ms_id:
+            org, name = ms_id.split("/")
+            if _complete_model_dir(_ms_model_path(org, name)):
+                return True
+        return _snapshot_complete(profile["huggingface_id"])
     if engine_type == "funasr" or engine_type in FUNASR_LEGACY_ENGINE_ALIASES:
         model_key = (
             FUNASR_LEGACY_ENGINE_ALIASES[engine_type]
@@ -421,26 +540,8 @@ def is_asr_cached(engine_type, model_size="medium", hub="ms") -> bool:
                 return False
         return True
     if engine_type == "anime-whisper":
-        # HF-only (not published to ModelScope). Check that snapshots dir actually
-        # contains weight files; an .incomplete blob means a prior run aborted mid-download.
-        model_id = ASR_MODEL_IDS[engine_type]
-        org, name = model_id.split("/")
-        snap_root = (
-            MODELS_DIR / "huggingface" / "hub" / f"models--{org}--{name}" / "snapshots"
-        )
-        if not snap_root.exists():
-            return False
-        for snap in snap_root.iterdir():
-            if not snap.is_dir():
-                continue
-            has_weights = any(
-                (snap / fn).exists()
-                for fn in ("model.safetensors", "pytorch_model.bin")
-            )
-            has_config = (snap / "config.json").exists()
-            if has_weights and has_config:
-                return True
-        return False
+        # HF-only (not published to ModelScope).
+        return _snapshot_complete(ASR_MODEL_IDS[engine_type])
     elif engine_type == "whisper":
         if model_size not in _WHISPER_SIZES:
             return resolve_custom_whisper_model(model_size) is not None
@@ -466,7 +567,12 @@ def get_missing_models(engine, model_size, hub) -> list:
     if not is_asr_cached(engine, model_size, hub):
         if engine == "whisper" and model_size not in _WHISPER_SIZES:
             return missing
-        if engine == "funasr" or engine in FUNASR_LEGACY_ENGINE_ALIASES:
+        if engine in ASR_ENGINE_PROFILES:
+            profile = ASR_ENGINE_PROFILES[engine]
+            key = engine
+            display = profile["display_name"]
+            estimated_bytes = profile["estimated_bytes"]
+        elif engine == "funasr" or engine in FUNASR_LEGACY_ENGINE_ALIASES:
             model_key = (
                 FUNASR_LEGACY_ENGINE_ALIASES[engine]
                 if engine in FUNASR_LEGACY_ENGINE_ALIASES
@@ -499,7 +605,14 @@ def get_local_model_path(engine_type, hub="ms", funasr_model: str | None = None)
 
     Checks the preferred hub first, then falls back to the other hub.
     """
-    if engine_type == "funasr" or engine_type in FUNASR_LEGACY_ENGINE_ALIASES:
+    profile = ASR_ENGINE_PROFILES.get(engine_type)
+    if profile and profile["cache_layout"] == "ct2":
+        ct2 = ct2_model_dir(engine_type)
+        return str(ct2) if ct2_model_complete(ct2) else None
+    if profile:
+        ms_org, ms_name = asr_model_id(engine_type, "ms").split("/")
+        hf_org, hf_name = asr_model_id(engine_type, "hf").split("/")
+    elif engine_type == "funasr" or engine_type in FUNASR_LEGACY_ENGINE_ALIASES:
         model_key = (
             FUNASR_LEGACY_ENGINE_ALIASES[engine_type]
             if engine_type in FUNASR_LEGACY_ENGINE_ALIASES
@@ -513,9 +626,13 @@ def get_local_model_path(engine_type, hub="ms", funasr_model: str | None = None)
     else:
         return None
 
+    # Profile engines need every weight shard before they can load; the legacy
+    # branches only require the directory to exist.
+    check = _complete_model_dir if profile else Path.exists
+
     def _try_ms():
         local = _ms_model_path(ms_org, ms_name)
-        return str(local) if local.exists() else None
+        return str(local) if check(local) else None
 
     def _try_hf():
         snap_dir = (
@@ -526,9 +643,9 @@ def get_local_model_path(engine_type, hub="ms", funasr_model: str | None = None)
             / "snapshots"
         )
         if snap_dir.exists():
-            snaps = sorted(snap_dir.iterdir())
-            if snaps:
-                return str(snaps[-1])
+            for snap in sorted(snap_dir.iterdir(), reverse=True):
+                if check(snap):
+                    return str(snap)
         return None
 
     if hub == "ms":
@@ -629,7 +746,41 @@ def download_asr(engine, model_size="medium", hub="ms", proxy="system"):
     ms_cache = os.path.join(resolved, "modelscope")
     hf_cache = os.path.join(resolved, "huggingface", "hub")
     with _proxy_env(proxy):
-        if engine == "funasr" or engine in FUNASR_LEGACY_ENGINE_ALIASES:
+        if engine in ASR_ENGINE_PROFILES:
+            profile = ASR_ENGINE_PROFILES[engine]
+            if profile["cache_layout"] == "ct2":
+                from ctranslate2.converters import TransformersConverter
+                from huggingface_hub import snapshot_download
+
+                model_id = profile["huggingface_id"]
+                log.info(f"Downloading {model_id} from HuggingFace...")
+                snapshot_path = snapshot_download(repo_id=model_id, cache_dir=hf_cache)
+                target = ct2_model_dir(engine)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                log.info(f"Converting {model_id} to CTranslate2 float16...")
+                # Without these two, faster-whisper fetches the tokenizer from
+                # the hub at load time and falls back to an 80-mel extractor,
+                # which does not match a large-v3 derived model (128 mels).
+                TransformersConverter(
+                    snapshot_path,
+                    copy_files=["tokenizer.json", "preprocessor_config.json"],
+                ).convert(str(target), quantization="float16", force=True)
+                log.info(f"CTranslate2 model ready: {target}")
+            elif hub == "ms" and profile["modelscope_id"]:
+                from modelscope import snapshot_download
+
+                log.info(f"Downloading {profile['modelscope_id']} from ModelScope...")
+                snapshot_download(
+                    model_id=profile["modelscope_id"], cache_dir=ms_cache
+                )
+            else:
+                from huggingface_hub import snapshot_download
+
+                log.info(f"Downloading {profile['huggingface_id']} from HuggingFace...")
+                snapshot_download(
+                    repo_id=profile["huggingface_id"], cache_dir=hf_cache
+                )
+        elif engine == "funasr" or engine in FUNASR_LEGACY_ENGINE_ALIASES:
             model_key = (
                 FUNASR_LEGACY_ENGINE_ALIASES[engine]
                 if engine in FUNASR_LEGACY_ENGINE_ALIASES
@@ -731,6 +882,10 @@ def get_cache_entries():
             entries.append((f"{name} (ModelScope)", ms_path))
         if hf_path.exists():
             entries.append((f"{name} (HuggingFace)", hf_path))
+        if engine in ASR_ENGINE_PROFILES:
+            ct2 = ct2_model_dir(engine)
+            if ct2_model_complete(ct2):
+                entries.append((f"{name} (CTranslate2)", ct2))
 
     for size in _WHISPER_SIZES:
         hf_path = hf_base / f"models--Systran--faster-whisper-{size}"
