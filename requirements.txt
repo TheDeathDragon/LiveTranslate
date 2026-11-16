@@ -1,7 +1,10 @@
 # Core dependencies
-# Keep NumPy within the range supported by current Numba wheels. Without this
-# cap, uv can backtrack to Numba/llvmlite releases that do not support Python 3.12.
-numpy>=1.24.0,<2.3
+# NumPy drops old Python versions one line at a time: 2.3 requires 3.11,
+# 2.5 requires 3.12. Each Python version takes the newest line with wheels:
+# 3.10 -> 2.2.x, 3.11 -> 2.4.x, 3.12+ -> 2.5.x.
+numpy>=1.24.0,<2.3; python_version < "3.11"
+numpy>=2.4.0,<2.5; python_version == "3.11"
+numpy>=2.5.0,<2.6; python_version >= "3.12"
 numba>=0.59.0
 PyYAML>=6.0
 httpx>=0.28.0
@@ -25,7 +28,7 @@ hydra-core>=1.3.2
 six>=1.16.0
 sentencepiece>=0.2.0
 tiktoken>=0.7.0
-transformers>=4.40.0
+transformers>=5.13.0
 
 # VAD (bundles the Silero v5 model in the wheel — no GitHub/torch.hub download)
 silero-vad>=5.0

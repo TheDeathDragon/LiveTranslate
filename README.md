@@ -6,7 +6,7 @@ Real-time audio translation for Windows. Captures system audio (WASAPI loopback)
 
 Works with any system audio — videos, livestreams, voice chat. No player modifications needed.
 
-![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue)
+![Python 3.10–3.14](https://img.shields.io/badge/Python-3.10--3.14-blue)
 ![Windows](https://img.shields.io/badge/Platform-Windows-0078d4)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
@@ -40,7 +40,7 @@ See [English Changelog](i18n/CHANGELOG_en.md) | [中文更新日志](i18n/CHANGE
 ## Requirements
 
 - **OS**: Windows 10/11
-- **Python**: 3.10–3.12 (or use the portable build)
+- **Python**: 3.10–3.14 (or use the portable build)
 - **GPU** (recommended): NVIDIA + CUDA 12.6 (Blackwell GPUs like RTX 50xx require CUDA 12.8)
 - **Network**: Access to a translation API
 
@@ -48,7 +48,7 @@ See [English Changelog](i18n/CHANGELOG_en.md) | [中文更新日志](i18n/CHANGE
 
 ### Portable build (no Python required, recommended for non-developers)
 
-Download `LiveTranslate-portable-*.zip` from [Releases](https://github.com/TheDeathDragon/LiveTranslate/releases), unzip, and double-click **`start.bat`**. The first run auto-downloads a portable Python 3.12 and installs GPU-aware dependencies — no Python installation needed.
+Download `LiveTranslate-portable-*.zip` from [Releases](https://github.com/TheDeathDragon/LiveTranslate/releases), unzip, and double-click **`start.bat`**. The first run auto-downloads a portable Python 3.14 and installs GPU-aware dependencies — no Python installation needed.
 
 ### From source
 
@@ -58,7 +58,7 @@ cd LiveTranslate
 ```
 
 Double-click **`install.bat`** — the installer will:
-1. Detect Python 3.10–3.12 (auto-install via winget if missing)
+1. Detect Python 3.10–3.14 (auto-install 3.14 via winget if missing)
 2. Create a virtual environment
 3. Auto-detect NVIDIA GPU and let you choose CUDA / CPU PyTorch
 4. Install all dependencies

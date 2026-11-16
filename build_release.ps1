@@ -1,6 +1,6 @@
 # LiveTranslate - Portable release builder
 # Produces a self-contained zip that runs without a system Python install.
-# First launch uses a bundled uv to fetch Python 3.12 + GPU-aware dependencies.
+# First launch uses a bundled uv to fetch Python 3.14 + GPU-aware dependencies.
 
 param([string]$Version = "")
 
@@ -139,8 +139,8 @@ function Enable-SystemProxy {
 }
 Enable-SystemProxy
 
-Write-Host "Creating virtual environment with Python 3.12..." -ForegroundColor Cyan
-& $Uv venv --python 3.12 --managed-python --allow-existing .venv
+Write-Host "Creating virtual environment with Python 3.14..." -ForegroundColor Cyan
+& $Uv venv --python 3.14 --managed-python --allow-existing .venv
 if ($LASTEXITCODE -ne 0) { Write-Host "Failed to create venv" -ForegroundColor Red; exit 1 }
 $Py = ".venv\Scripts\python.exe"
 
