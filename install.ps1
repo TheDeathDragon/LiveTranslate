@@ -1,5 +1,5 @@
 # LiveTranslate - One-click installer
-# Usage: Double-click install.bat (or run: powershell -ExecutionPolicy Bypass -File install.ps1)
+# Usage: Double-click install.bat (or run: pwsh -ExecutionPolicy Bypass -File install.ps1)
 
 $ErrorActionPreference = "Stop"
 $ProjectDir = Split-Path -Parent $MyInvocation.MyCommand.Path
