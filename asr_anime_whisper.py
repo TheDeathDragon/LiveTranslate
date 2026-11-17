@@ -31,7 +31,7 @@ class AnimeWhisperEngine:
             "automatic-speech-recognition",
             model=model,
             device=device,
-            torch_dtype=dtype,
+            dtype=dtype,
             chunk_length_s=30.0,
             batch_size=1,
         )

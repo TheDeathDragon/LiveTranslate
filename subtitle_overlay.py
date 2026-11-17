@@ -332,7 +332,7 @@ class ChatMessage(QWidget):
         export_both = export_menu.addAction(t("export_all"))
         menu.addSeparator()
         clear_list = menu.addAction(t("clear_list"))
-        action = menu.exec(event.globalPos())
+        action = menu.exec(event.globalPosition().toPoint())
         if action == copy_orig:
             QApplication.clipboard().setText(self._original)
         elif action == copy_trans:
