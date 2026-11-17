@@ -30,6 +30,7 @@ from PyQt6.QtWidgets import (
 )
 
 from model_manager import ASR_ENGINE_PROFILES, download_asr, download_silero
+from memory_guard import suspend_memory_check
 from i18n import t, get_lang
 
 log = logging.getLogger("LiveTranslate.Dialogs")
@@ -435,31 +436,35 @@ class ModelDownloadDialog(QDialog):
 
     def _download_worker(self):
         try:
-            for m in self._missing:
-                if m["type"] == "silero-vad":
-                    download_silero(proxy=self._proxy)
-                elif m["type"] in ASR_ENGINE_PROFILES:
-                    download_asr(m["type"], hub=self._hub, proxy=self._proxy)
-                elif m["type"] in (
-                    "sensevoice",
-                    "funasr-nano",
-                    "funasr-mlt-nano",
-                    "anime-whisper",
-                ):
-                    download_asr(m["type"], hub=self._hub, proxy=self._proxy)
-                elif m["type"].startswith("funasr:"):
-                    model_key = m["type"].split(":", 1)[1]
-                    download_asr(
-                        "funasr",
-                        model_size=model_key,
-                        hub=self._hub,
-                        proxy=self._proxy,
-                    )
-                elif m["type"].startswith("whisper-"):
-                    size = m["type"].replace("whisper-", "")
-                    download_asr(
-                        "whisper", model_size=size, hub=self._hub, proxy=self._proxy
-                    )
+            with suspend_memory_check():
+                for m in self._missing:
+                    if m["type"] == "silero-vad":
+                        download_silero(proxy=self._proxy)
+                    elif m["type"] in ASR_ENGINE_PROFILES:
+                        download_asr(m["type"], hub=self._hub, proxy=self._proxy)
+                    elif m["type"] in (
+                        "sensevoice",
+                        "funasr-nano",
+                        "funasr-mlt-nano",
+                        "anime-whisper",
+                    ):
+                        download_asr(m["type"], hub=self._hub, proxy=self._proxy)
+                    elif m["type"].startswith("funasr:"):
+                        model_key = m["type"].split(":", 1)[1]
+                        download_asr(
+                            "funasr",
+                            model_size=model_key,
+                            hub=self._hub,
+                            proxy=self._proxy,
+                        )
+                    elif m["type"].startswith("whisper-"):
+                        size = m["type"].replace("whisper-", "")
+                        download_asr(
+                            "whisper",
+                            model_size=size,
+                            hub=self._hub,
+                            proxy=self._proxy,
+                        )
         except Exception as e:
             self._error = str(e)
             log.error(f"Download failed: {e}", exc_info=True)

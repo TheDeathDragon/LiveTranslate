@@ -74,6 +74,7 @@ from dialogs import (
     ModelDownloadDialog,
     _ModelLoadDialog,
 )
+from memory_guard import memory_check_suspended, suspend_memory_check
 from i18n import t, set_lang, LANGUAGES, COMMON_LANG_CODES
 
 _NO_PENDING = object()
@@ -500,6 +501,10 @@ class LiveTranslateApp:
         self._output_price = model_config.get("output_price", 0)
 
     def _switch_asr_engine(self, engine_type: str):
+        with suspend_memory_check():
+            return self._switch_asr_engine_impl(engine_type)
+
+    def _switch_asr_engine_impl(self, engine_type: str):
         settings = self._panel.get_settings() if self._panel else {}
         engine_type, funasr_model = normalize_asr_engine_selection(
             engine_type, settings.get("funasr_model", self._funasr_model_key)
@@ -1045,7 +1050,11 @@ class LiveTranslateApp:
                 self._overlay.update_asr_device("ASR unavailable")
 
     def _check_memory_threshold(self, rss_mb: float):
-        if self._mem_warned or rss_mb < self._mem_threshold_mb:
+        if (
+            memory_check_suspended()
+            or self._mem_warned
+            or rss_mb < self._mem_threshold_mb
+        ):
             return
         self._mem_warned = True
         log.warning(
