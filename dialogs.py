@@ -29,7 +29,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from model_manager import download_asr, download_silero
+from model_manager import ASR_ENGINE_PROFILES, download_asr, download_silero
+from memory_guard import suspend_memory_check
 from i18n import t, get_lang
 
 log = logging.getLogger("LiveTranslate.Dialogs")
@@ -93,8 +94,8 @@ class _LogCapture(logging.Handler):
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 
-class _StderrCapture:
-    """Captures stderr (tqdm) and forwards cleaned lines via callback."""
+class _StreamCapture:
+    """Captures stdout/stderr (tqdm) and forwards cleaned lines via callback."""
 
     def __init__(self, callback, original):
         self._cb = callback
@@ -116,7 +117,9 @@ class _StderrCapture:
             self._orig.flush()
 
     def isatty(self):
-        return False
+        # tqdm disables itself with disable=None when the stream is not a TTY.
+        # The log view can render carriage-return updates, so report a TTY.
+        return True
 
 
 class _ModelLoadDialog(QDialog):
@@ -298,7 +301,9 @@ class SetupWizardDialog(QDialog):
 
         logging.getLogger().addHandler(self._log_handler)
         self._orig_stderr = sys.stderr
-        sys.stderr = _StderrCapture(self._log_signal.emit, self._orig_stderr)
+        sys.stderr = _StreamCapture(self._log_signal.emit, self._orig_stderr)
+        self._orig_stdout = sys.stdout
+        sys.stdout = _StreamCapture(self._log_signal.emit, self._orig_stdout)
 
         self._error = None
         self._download_thread = threading.Thread(
@@ -324,6 +329,7 @@ class SetupWizardDialog(QDialog):
             return
         self._poll_timer.stop()
         sys.stderr = self._orig_stderr
+        sys.stdout = self._orig_stdout
         logging.getLogger().removeHandler(self._log_handler)
 
         if self._error:
@@ -414,7 +420,9 @@ class ModelDownloadDialog(QDialog):
     def _start_download(self):
         logging.getLogger().addHandler(self._log_handler)
         self._orig_stderr = sys.stderr
-        sys.stderr = _StderrCapture(self._log_signal.emit, self._orig_stderr)
+        sys.stderr = _StreamCapture(self._log_signal.emit, self._orig_stderr)
+        self._orig_stdout = sys.stdout
+        sys.stdout = _StreamCapture(self._log_signal.emit, self._orig_stdout)
 
         self._download_thread = threading.Thread(
             target=self._download_worker, daemon=True
@@ -428,29 +436,35 @@ class ModelDownloadDialog(QDialog):
 
     def _download_worker(self):
         try:
-            for m in self._missing:
-                if m["type"] == "silero-vad":
-                    download_silero(proxy=self._proxy)
-                elif m["type"] in (
-                    "sensevoice",
-                    "funasr-nano",
-                    "funasr-mlt-nano",
-                    "anime-whisper",
-                ):
-                    download_asr(m["type"], hub=self._hub, proxy=self._proxy)
-                elif m["type"].startswith("funasr:"):
-                    model_key = m["type"].split(":", 1)[1]
-                    download_asr(
-                        "funasr",
-                        model_size=model_key,
-                        hub=self._hub,
-                        proxy=self._proxy,
-                    )
-                elif m["type"].startswith("whisper-"):
-                    size = m["type"].replace("whisper-", "")
-                    download_asr(
-                        "whisper", model_size=size, hub=self._hub, proxy=self._proxy
-                    )
+            with suspend_memory_check():
+                for m in self._missing:
+                    if m["type"] == "silero-vad":
+                        download_silero(proxy=self._proxy)
+                    elif m["type"] in ASR_ENGINE_PROFILES:
+                        download_asr(m["type"], hub=self._hub, proxy=self._proxy)
+                    elif m["type"] in (
+                        "sensevoice",
+                        "funasr-nano",
+                        "funasr-mlt-nano",
+                        "anime-whisper",
+                    ):
+                        download_asr(m["type"], hub=self._hub, proxy=self._proxy)
+                    elif m["type"].startswith("funasr:"):
+                        model_key = m["type"].split(":", 1)[1]
+                        download_asr(
+                            "funasr",
+                            model_size=model_key,
+                            hub=self._hub,
+                            proxy=self._proxy,
+                        )
+                    elif m["type"].startswith("whisper-"):
+                        size = m["type"].replace("whisper-", "")
+                        download_asr(
+                            "whisper",
+                            model_size=size,
+                            hub=self._hub,
+                            proxy=self._proxy,
+                        )
         except Exception as e:
             self._error = str(e)
             log.error(f"Download failed: {e}", exc_info=True)
@@ -460,6 +474,7 @@ class ModelDownloadDialog(QDialog):
             return
         self._poll_timer.stop()
         sys.stderr = self._orig_stderr
+        sys.stdout = self._orig_stdout
         logging.getLogger().removeHandler(self._log_handler)
 
         if self._error:

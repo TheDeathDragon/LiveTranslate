@@ -1,5 +1,5 @@
 # LiveTranslate - One-click installer
-# Usage: Double-click install.bat (or run: powershell -ExecutionPolicy Bypass -File install.ps1)
+# Usage: Double-click install.bat (or run: pwsh -ExecutionPolicy Bypass -File install.ps1)
 
 $ErrorActionPreference = "Stop"
 $ProjectDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -64,8 +64,9 @@ New-Item -ItemType Directory -Force -Path $env:TMP | Out-Null
 Write-Step "Detecting Python..."
 
 function Find-Python {
-    # 3.13+ rejected: no ctranslate2 cp313 wheels (#15), strict SSL breaks torch.hub (#20)
-    foreach ($v in @("3.12", "3.11", "3.10")) {
+    # Supported range: 3.10-3.14; ctranslate2, torch and PyAudioWPatch all
+    # publish cp314 wheels, so 3.14 installs from binaries like older versions.
+    foreach ($v in @("3.14", "3.13", "3.12", "3.11", "3.10")) {
         try {
             $exe = & py "-$v" -c "import sys; print(sys.executable)" 2>&1
             if ($LASTEXITCODE -eq 0 -and $exe -and (Test-Path $exe.Trim())) {
@@ -83,13 +84,13 @@ function Find-Python {
             if ($ver -match "Python (\d+)\.(\d+)") {
                 $major = [int]$Matches[1]
                 $minor = [int]$Matches[2]
-                if ($major -eq 3 -and $minor -ge 10 -and $minor -le 12) {
+                if ($major -eq 3 -and $minor -ge 10 -and $minor -le 14) {
                     Write-Ok "Found $ver ($cmd)"
                     return $cmd
-                } elseif ($major -eq 3 -and $minor -ge 13) {
-                    Write-Warn "$ver is too new (faster-whisper/SSL require 3.10-3.12)"
+                } elseif ($major -eq 3 -and $minor -ge 15) {
+                    Write-Warn "$ver is too new (need 3.10-3.14)"
                 } else {
-                    Write-Warn "$ver is too old (need 3.10-3.12)"
+                    Write-Warn "$ver is too old (need 3.10-3.14)"
                 }
             }
         } catch {}
@@ -100,7 +101,7 @@ function Find-Python {
 $PythonCmd = Find-Python
 
 if (-not $PythonCmd) {
-    Write-Warn "No supported Python (3.10-3.12) found"
+    Write-Warn "No supported Python (3.10-3.14) found"
 
     # Try to install via winget
     $hasWinget = $false
@@ -112,10 +113,10 @@ if (-not $PythonCmd) {
     if ($hasWinget) {
         Write-Host ""
         Write-Host "  Python can be installed automatically via winget." -ForegroundColor White
-        $answer = Read-Host "  Install Python 3.12 now? [Y/n]"
+        $answer = Read-Host "  Install Python 3.14 now? [Y/n]"
         if ($answer -eq "" -or $answer -match "^[Yy]") {
-            Write-Step "Installing Python 3.12 via winget..."
-            & winget install Python.Python.3.12 --accept-package-agreements --accept-source-agreements
+            Write-Step "Installing Python 3.14 via winget..."
+            & winget install Python.Python.3.14 --accept-package-agreements --accept-source-agreements
             if ($LASTEXITCODE -ne 0) {
                 Write-Err "winget install failed"
                 Read-Host "Press Enter to exit"
@@ -132,12 +133,12 @@ if (-not $PythonCmd) {
                 exit 1
             }
         } else {
-            Write-Err "Python 3.10-3.12 is required. Please install from https://www.python.org/downloads/"
+            Write-Err "Python 3.10-3.14 is required. Please install from https://www.python.org/downloads/"
             Read-Host "Press Enter to exit"
             exit 1
         }
     } else {
-        Write-Err "Python 3.10-3.12 not found and winget is not available."
+        Write-Err "Python 3.10-3.14 not found and winget is not available."
         Write-Host "  Please install Python from https://www.python.org/downloads/" -ForegroundColor Yellow
         Write-Host "  Make sure to check 'Add Python to PATH' during installation." -ForegroundColor Yellow
         Read-Host "Press Enter to exit"

@@ -1,5 +1,9 @@
 # 更新日志
 
+## 2026-11-17
+- 新增 Qwen3-ASR 1.7B 引擎: 基于 transformers 原生实现, 支持 30 种语言与自动检测, 显存需求约 4.1GB, 日语与韩语识别精度优于 Whisper
+- 新增 BuzzASR Korean 引擎: 韩语专用, 权重转换为 CTranslate2 float16 后复用 Whisper 推理路径
+
 ## 2026-08-17
 - 增量 ASR 的分句库从 PySBD 切换到 yasbd-lib (#37): API 兼容无行为变化, 新增韩语等 17 种语言的原生分句规则 (此前韩语回退英语规则), 长文本分割速度大幅提升
 - 修复 DeepSeek 默认开启思考模式导致翻译返回空、界面显示原文的问题 (#38): DeepSeek 需要 thinking.type=disabled 才能关闭思考, 此前发送的 enable_thinking=false 是 Qwen 风格参数对其无效; 模型编辑对话框新增「禁用思考」风格选择 (自动识别 / DeepSeek·火山方舟·GLM / Qwen·百炼·硅基流动 / vLLM·SGLang 自部署 / OpenAI·Grok reasoning_effort / 不发送), 自动识别对 OpenAI 等会拒绝未知参数的官方端点不再乱发参数; 思考耗尽 token 返回空时输出诊断日志

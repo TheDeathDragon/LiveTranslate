@@ -36,6 +36,7 @@ from dialogs import (
     make_scroll_area,
 )
 from model_manager import (
+    ASR_ENGINE_PROFILES,
     DEFAULT_FUNASR_MODEL,
     MODELS_DIR,
     _WHISPER_SIZES,
@@ -212,21 +213,18 @@ class ControlPanel(QWidget):
 
         self._asr_engine = QComboBox()
         self._asr_engine.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-        self._asr_engine.addItems(
-            [
-                f"[{t('asr_accurate')}] Whisper (faster-whisper)",
-                f"[{t('asr_fast')}] FunASR",
-                "Anime-Whisper (ja, anime/galgame)",
-                "Remote Whisper (remote GPU server)",
-            ]
-        )
-        engine_map_idx = {
-            "whisper": 0,
-            "funasr": 1,
-            "anime-whisper": 2,
-            "remote-whisper": 3,
-        }
-        engine_idx = engine_map_idx.get(s.get("asr_engine"), 0)
+        for engine_key, label in (
+            ("whisper", f"[{t('asr_accurate')}] Whisper (faster-whisper)"),
+            ("funasr", f"[{t('asr_fast')}] FunASR"),
+            ("anime-whisper", "Anime-Whisper (ja, anime/galgame)"),
+            ("remote-whisper", "Remote Whisper (remote GPU server)"),
+            ("qwen3-asr", "Qwen3-ASR 1.7B (multilingual)"),
+            ("buzzasr-korean", "BuzzASR Korean (ko)"),
+        ):
+            self._asr_engine.addItem(label, engine_key)
+        engine_idx = self._asr_engine.findData(s.get("asr_engine"))
+        if engine_idx < 0:
+            engine_idx = 0
         self._asr_engine.setCurrentIndex(engine_idx)
         asr_layout.addWidget(QLabel(t("label_engine")), 0, 0)
         asr_layout.addWidget(self._asr_engine, 0, 1)
@@ -400,11 +398,10 @@ class ControlPanel(QWidget):
         self._whisper_dl_btn.clicked.connect(self._download_whisper)
         whisper_layout.addWidget(self._whisper_dl_btn)
         layout.addWidget(self._whisper_group)
-        self._whisper_group.setVisible(engine_idx == 0)
         self._asr_engine.currentIndexChanged.connect(
-            self._on_engine_changed_whisper_vis
+            self._on_engine_selection_changed
         )
-        self._on_engine_changed_whisper_vis(engine_idx)
+        self._on_engine_selection_changed()
         self._update_whisper_size_label()
 
         # Remote ASR server URL — only visible when engine is Remote Whisper
@@ -418,7 +415,9 @@ class ControlPanel(QWidget):
         self._remote_url_edit.editingFinished.connect(self._auto_save)
         remote_layout.addWidget(self._remote_url_edit, 1)
         layout.addWidget(self._remote_group)
-        self._remote_group.setVisible(engine_idx == 3)
+        self._remote_group.setVisible(
+            self._asr_engine.currentData() == "remote-whisper"
+        )
 
         mode_group = QGroupBox(t("group_vad_mode"))
         mode_layout = QVBoxLayout(mode_group)
@@ -1115,16 +1114,25 @@ class ControlPanel(QWidget):
         """Get the language code from the ASR language combo (stored as userData)."""
         return self._asr_lang.currentData() or "auto"
 
-    def _on_engine_changed_whisper_vis(self, index):
-        self._whisper_group.setVisible(index == 0)
-        is_funasr = index == 1
+    def _on_engine_selection_changed(self, *_args):
+        """Show only the option groups that belong to the selected engine.
+
+        Connected to currentIndexChanged, which passes the row index; the
+        engine key is read from userData instead so the order of the items
+        does not matter.
+        """
+        engine_key = self._asr_engine.currentData()
+        is_whisper = engine_key == "whisper"
+        is_funasr = engine_key == "funasr"
+        profile = ASR_ENGINE_PROFILES.get(engine_key) if engine_key else None
+        show_pad = is_whisper or bool(profile and profile["supports_padding"])
+        self._whisper_group.setVisible(is_whisper)
         if hasattr(self, "_funasr_model_combo"):
             self._funasr_model_label.setVisible(is_funasr)
             self._funasr_model_combo.setVisible(is_funasr)
         if hasattr(self, "_whisper_pad_seconds"):
-            is_whisper = index == 0
-            self._whisper_pad_label.setVisible(is_whisper)
-            self._whisper_pad_seconds.setVisible(is_whisper)
+            self._whisper_pad_label.setVisible(show_pad)
+            self._whisper_pad_seconds.setVisible(show_pad)
         if hasattr(self, "_sensevoice_pad_seconds"):
             show_funasr_pad = is_funasr and funasr_supports_padding(
                 self._selected_funasr_model()
@@ -1132,7 +1140,7 @@ class ControlPanel(QWidget):
             self._sensevoice_pad_label.setVisible(show_funasr_pad)
             self._sensevoice_pad_seconds.setVisible(show_funasr_pad)
         if hasattr(self, "_remote_group"):
-            self._remote_group.setVisible(index == 3)
+            self._remote_group.setVisible(engine_key == "remote-whisper")
         # Resize window to fit content after whisper group visibility change
         QTimer.singleShot(0, self._fit_height)
 
@@ -1142,7 +1150,7 @@ class ControlPanel(QWidget):
 
     def _on_funasr_model_changed(self):
         self._current_settings["funasr_model"] = self._selected_funasr_model()
-        self._on_engine_changed_whisper_vis(self._asr_engine.currentIndex())
+        self._on_engine_selection_changed()
         self._auto_save()
 
     def _selected_whisper_model(self) -> str:
@@ -1441,14 +1449,8 @@ class ControlPanel(QWidget):
 
     def _apply_settings(self):
         self._current_settings["asr_language"] = self._get_asr_lang_code()
-        engine_map = {
-            0: "whisper",
-            1: "funasr",
-            2: "anime-whisper",
-            3: "remote-whisper",
-        }
-        self._current_settings["asr_engine"] = engine_map.get(
-            self._asr_engine.currentIndex(), "whisper"
+        self._current_settings["asr_engine"] = (
+            self._asr_engine.currentData() or "whisper"
         )
         self._current_settings["funasr_model"] = self._selected_funasr_model()
         if hasattr(self, "_remote_url_edit"):

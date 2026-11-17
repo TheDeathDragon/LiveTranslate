@@ -332,7 +332,7 @@ class ChatMessage(QWidget):
         export_both = export_menu.addAction(t("export_all"))
         menu.addSeparator()
         clear_list = menu.addAction(t("clear_list"))
-        action = menu.exec(event.globalPos())
+        action = menu.exec(event.globalPosition().toPoint())
         if action == copy_orig:
             QApplication.clipboard().setText(self._original)
         elif action == copy_trans:
@@ -457,7 +457,6 @@ class MonitorBar(QWidget):
         self._proc.cpu_percent(interval=None)  # Prime the counter
         self._cpu = 0
         self._ram_mb = 0.0
-        self._gpu_text = "N/A"
         self._asr_device = ""
         self._asr_count = 0
         self._tl_count = 0
@@ -501,16 +500,6 @@ class MonitorBar(QWidget):
             self._ram_mb = self._proc.memory_info().rss / 1024 / 1024
         except Exception:
             pass
-        try:
-            import torch
-
-            if torch.cuda.is_available():
-                alloc = torch.cuda.memory_allocated() / 1024 / 1024
-                self._gpu_text = f"{alloc:.0f}MB"
-            else:
-                self._gpu_text = "N/A"
-        except Exception:
-            self._gpu_text = "N/A"
         self._refresh_stats()
 
     def _refresh_stats(self):
@@ -532,7 +521,6 @@ class MonitorBar(QWidget):
             f"{dev_str}"
             f'<span style="color:#6cf;">CPU</span> {self._cpu}% '
             f'<span style="color:#6cf;">RAM</span> {self._ram_mb:.0f}MB '
-            f'<span style="color:#6cf;">GPU</span> {self._gpu_text} '
             f'<span style="color:#555;">|</span> '
             f'<span style="color:#8b8;">ASR</span> {self._asr_count} '
             f'<span style="color:#db8;">TL</span> {self._tl_count} '

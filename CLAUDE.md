@@ -35,6 +35,7 @@ main.py (LiveTranslateApp)
   |-- asr_sensevoice.py    FunASR SenseVoice backend (better for Japanese)
   |-- asr_funasr_nano.py   FunASR Nano backend
   |-- asr_anime_whisper.py Anime-Whisper backend (litagin/anime-whisper, ja anime/galgame)
+  |-- asr_qwen3.py        Qwen3-ASR backend (transformers, multilingual)
   |-- translator.py        OpenAI-compatible API client, streaming, JSON schema, context history
   |-- subtitle_overlay.py  PyQt6 transparent overlay (2-row header: controls + model/lang combos)
   |-- subtitle_window.py   Standalone subtitle window for OBS capture (outlined text, animations)
@@ -96,7 +97,7 @@ DragHandle is a 2-row header bar:
 - **Row 1**: Draggable title + action buttons (Hide, Subtitle, Paused/Running, Clear, Full/Compact, Settings, Quit)
 - **Row 2**: Checkboxes (Click-through, Top-most, Auto-scroll, Taskbar) + Model combo + Target Language combo
 
-MonitorBar displays: ASR device, CPU/RAM/GPU usage, ASR/TL counts, token usage with cost estimation (¥/$ based on UI language).
+MonitorBar displays: ASR device, CPU/RAM usage, ASR/TL counts, token usage with cost estimation (¥/$ based on UI language).
 
 Style system:
 - `DEFAULT_STYLE` and `STYLE_PRESETS` defined in `subtitle_overlay.py` — 14 presets including terminal themes (Dracula, Nord, Monokai, Solarized, Gruvbox, Tokyo Night, Catppuccin, One Dark, Everforest, Kanagawa)

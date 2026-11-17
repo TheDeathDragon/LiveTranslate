@@ -9,7 +9,7 @@ audio:
   chunk_duration: 0.032
 
 asr:
-  # ASR engine: whisper, funasr, anime-whisper
+  # ASR engine: whisper, funasr, anime-whisper, remote-whisper, qwen3-asr, buzzasr-korean
   asr_engine: "funasr"
   # Model size: tiny, base, small, medium, large-v3
   model_size: "medium"

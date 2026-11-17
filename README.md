@@ -6,7 +6,7 @@ Real-time audio translation for Windows. Captures system audio (WASAPI loopback)
 
 Works with any system audio — videos, livestreams, voice chat. No player modifications needed.
 
-![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue)
+![Python 3.10–3.14](https://img.shields.io/badge/Python-3.10--3.14-blue)
 ![Windows](https://img.shields.io/badge/Platform-Windows-0078d4)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
@@ -21,7 +21,7 @@ Works with any system audio — videos, livestreams, voice chat. No player modif
 ## Features
 
 - **Real-time pipeline**: System audio → VAD → ASR → LLM translation → overlay
-- **Multiple ASR engines**: faster-whisper, SenseVoice, FunASR Nano, Anime-Whisper
+- **Multiple ASR engines**: faster-whisper, SenseVoice, FunASR Nano, Anime-Whisper, Qwen3-ASR, BuzzASR Korean
 - **Remote ASR**: offload speech recognition to a GPU machine over HTTP — see [REMOTE_ASR.md](REMOTE_ASR.md)
 - **Any OpenAI-compatible API**: DeepSeek, Grok, Qwen, GPT, Ollama, vLLM, etc.
 - **Streaming translation display**: Real-time character-by-character translation output
@@ -40,7 +40,7 @@ See [English Changelog](i18n/CHANGELOG_en.md) | [中文更新日志](i18n/CHANGE
 ## Requirements
 
 - **OS**: Windows 10/11
-- **Python**: 3.10–3.12 (or use the portable build)
+- **Python**: 3.10–3.14 (or use the portable build)
 - **GPU** (recommended): NVIDIA + CUDA 12.6 (Blackwell GPUs like RTX 50xx require CUDA 12.8)
 - **Network**: Access to a translation API
 
@@ -48,7 +48,7 @@ See [English Changelog](i18n/CHANGELOG_en.md) | [中文更新日志](i18n/CHANGE
 
 ### Portable build (no Python required, recommended for non-developers)
 
-Download `LiveTranslate-portable-*.zip` from [Releases](https://github.com/TheDeathDragon/LiveTranslate/releases), unzip, and double-click **`start.bat`**. The first run auto-downloads a portable Python 3.12 and installs GPU-aware dependencies — no Python installation needed.
+Download `LiveTranslate-portable-*.zip` from [Releases](https://github.com/TheDeathDragon/LiveTranslate/releases), unzip, and double-click **`start.bat`**. The first run auto-downloads a portable Python 3.14 and installs GPU-aware dependencies — no Python installation needed.
 
 ### From source
 
@@ -58,7 +58,7 @@ cd LiveTranslate
 ```
 
 Double-click **`install.bat`** — the installer will:
-1. Detect Python 3.10–3.12 (auto-install via winget if missing)
+1. Detect Python 3.10–3.14 (auto-install 3.14 via winget if missing)
 2. Create a virtual environment
 3. Auto-detect NVIDIA GPU and let you choose CUDA / CPU PyTorch
 4. Install all dependencies
@@ -121,6 +121,7 @@ main.py                 Entry point & pipeline
 ├── asr_sensevoice.py   SenseVoice backend
 ├── asr_funasr_nano.py  FunASR Nano backend
 ├── asr_anime_whisper.py Anime-Whisper backend (ja anime/galgame)
+├── asr_qwen3.py        Qwen3-ASR backend (transformers, multilingual)
 ├── asr_remote.py        Remote Whisper client (→ asr_server.py, see REMOTE_ASR.md)
 ├── translator.py       OpenAI-compatible client (streaming, JSON schema, context)
 ├── model_manager.py    Model download & cache
@@ -135,6 +136,8 @@ main.py                 Entry point & pipeline
 - [faster-whisper](https://github.com/SYSTRAN/faster-whisper) — Whisper inference via CTranslate2
 - [FunASR](https://github.com/modelscope/FunASR) — SenseVoice / Fun-ASR-Nano
 - [Anime-Whisper](https://huggingface.co/litagin/anime-whisper) — Japanese anime/galgame ASR
+- [Qwen3-ASR](https://huggingface.co/Qwen/Qwen3-ASR-1.7B-hf) — Multilingual ASR via transformers
+- [BuzzASR](https://huggingface.co/BuzzASR/korean) — Korean ASR
 - [Silero VAD](https://github.com/snakers4/silero-vad) — Voice activity detection
 
 ## Star History

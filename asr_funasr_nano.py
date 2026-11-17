@@ -75,7 +75,8 @@ class FunASRNanoEngine:
 
     def transcribe(self, audio: np.ndarray) -> dict | None:
         """Transcribe audio segment (float32, 16kHz mono)."""
-        tmp = tempfile.mktemp(suffix=".wav")
+        fd, tmp = tempfile.mkstemp(suffix=".wav")
+        os.close(fd)
         try:
             audio_16bit = (audio * 32767).astype(np.int16)
             with wave.open(tmp, "w") as wf:

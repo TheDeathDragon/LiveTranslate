@@ -1,6 +1,6 @@
 # LiveTranslate - Portable release builder
 # Produces a self-contained zip that runs without a system Python install.
-# First launch uses a bundled uv to fetch Python 3.12 + GPU-aware dependencies.
+# First launch uses a bundled uv to fetch Python 3.14 + GPU-aware dependencies.
 
 param([string]$Version = "")
 
@@ -65,7 +65,12 @@ goto launch
 
 :setup
     echo First run: setting up environment. This downloads Python and dependencies and may take several minutes...
-    powershell -ExecutionPolicy Bypass -File "%~dp0bootstrap.ps1"
+    where pwsh >nul 2>&1
+    if not errorlevel 1 (
+        pwsh -ExecutionPolicy Bypass -File "%~dp0bootstrap.ps1"
+    ) else (
+        powershell -ExecutionPolicy Bypass -File "%~dp0bootstrap.ps1"
+    )
     if errorlevel 1 (
         echo.
         echo [ERROR] Setup failed. See messages above.
@@ -139,8 +144,8 @@ function Enable-SystemProxy {
 }
 Enable-SystemProxy
 
-Write-Host "Creating virtual environment with Python 3.12..." -ForegroundColor Cyan
-& $Uv venv --python 3.12 --managed-python --allow-existing .venv
+Write-Host "Creating virtual environment with Python 3.14..." -ForegroundColor Cyan
+& $Uv venv --python 3.14 --managed-python --allow-existing .venv
 if ($LASTEXITCODE -ne 0) { Write-Host "Failed to create venv" -ForegroundColor Red; exit 1 }
 $Py = ".venv\Scripts\python.exe"
 

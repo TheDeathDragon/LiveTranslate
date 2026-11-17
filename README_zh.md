@@ -6,7 +6,7 @@ Windows 实时音频翻译工具。捕获系统音频（WASAPI loopback）和可
 
 适用于看外语视频、直播、语音对话等场景——无需修改播放器，全局音频捕获即开即用。
 
-![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue)
+![Python 3.10–3.14](https://img.shields.io/badge/Python-3.10--3.14-blue)
 ![Windows](https://img.shields.io/badge/Platform-Windows-0078d4)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
@@ -40,7 +40,7 @@ Windows 实时音频翻译工具。捕获系统音频（WASAPI loopback）和可
 ## 系统要求
 
 - **操作系统**：Windows 10/11
-- **Python**：3.10–3.12（绿色版免装）
+- **Python**：3.10–3.14（绿色版免装）
 - **GPU**（推荐）：NVIDIA 显卡 + CUDA 12.6（RTX 50 系列等 Blackwell 架构需要 CUDA 12.8）
 - **网络**：需要访问翻译 API
 
@@ -48,7 +48,7 @@ Windows 实时音频翻译工具。捕获系统音频（WASAPI loopback）和可
 
 ### 绿色版（免装 Python，推荐新手）
 
-从 [Releases](https://github.com/TheDeathDragon/LiveTranslate/releases) 下载 `LiveTranslate-portable-*.zip`，解压后双击 **`start.bat`** 即可。首次运行会自动下载便携版 Python 3.12 并按显卡安装依赖，无需预装任何 Python。
+从 [Releases](https://github.com/TheDeathDragon/LiveTranslate/releases) 下载 `LiveTranslate-portable-*.zip`，解压后双击 **`start.bat`** 即可。首次运行会自动下载便携版 Python 3.14 并按显卡安装依赖，无需预装任何 Python。
 
 ### 从源码安装
 
@@ -58,7 +58,7 @@ cd LiveTranslate
 ```
 
 双击 **`install.bat`** 一键安装——脚本会自动：
-1. 检测 Python 3.10–3.12（未安装则通过 winget 自动安装）
+1. 检测 Python 3.10–3.14（未安装则通过 winget 自动安装 3.14）
 2. 创建虚拟环境
 3. 检测 NVIDIA 显卡，选择 CUDA / CPU 版 PyTorch
 4. 安装全部依赖

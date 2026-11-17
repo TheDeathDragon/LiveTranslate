@@ -52,7 +52,12 @@ def _parse_device(device: str) -> tuple[str, int]:
 
 
 def _load_engine(config: dict):
-    from model_manager import MODELS_DIR, apply_cache_env
+    from model_manager import (
+        ASR_ENGINE_PROFILES,
+        MODELS_DIR,
+        apply_cache_env,
+        get_local_model_path,
+    )
 
     apply_cache_env()
 
@@ -62,40 +67,69 @@ def _load_engine(config: dict):
     language = config.get("language", "auto")
     pad_seconds = config.get("pad_seconds")
 
+    profile = ASR_ENGINE_PROFILES.get(engine_type)
+    if profile and profile["language_locked"]:
+        language = profile["language_locked"]
+        # Remember the lock so a runtime set_language command cannot undo it.
+        config["language"] = language
+        config["language_locked"] = True
+
     parsed_device, device_index = _parse_device(device)
+    worker_device = parsed_device if parsed_device == "cpu" else f"cuda:{device_index}"
+    compute_type = config.get("compute_type", "float16")
+    if parsed_device == "cpu" and compute_type == "float16":
+        compute_type = "int8"
 
-    if engine_type == "funasr":
-        from asr_funasr import FunASREngine
+    match engine_type:
+        case "funasr":
+            from asr_funasr import FunASREngine
 
-        engine = FunASREngine(
-            model_key=config.get("funasr_model"),
-            device=device,
-            hub=hub,
-            pad_seconds=pad_seconds,
-        )
-    elif engine_type == "anime-whisper":
-        from asr_anime_whisper import AnimeWhisperEngine
+            engine = FunASREngine(
+                model_key=config.get("funasr_model"),
+                device=device,
+                hub=hub,
+                pad_seconds=pad_seconds,
+            )
+        case "anime-whisper":
+            from asr_anime_whisper import AnimeWhisperEngine
 
-        worker_device = parsed_device if parsed_device == "cpu" else f"cuda:{device_index}"
-        engine = AnimeWhisperEngine(device=worker_device, hub=hub)
-    else:
-        from asr_engine import ASREngine
+            engine = AnimeWhisperEngine(device=worker_device, hub=hub)
+        case "qwen3-asr":
+            from asr_qwen3 import Qwen3ASREngine
 
-        compute_type = config.get("compute_type", "float16")
-        if parsed_device == "cpu" and compute_type == "float16":
-            compute_type = "int8"
-        download_root = config.get("download_root")
-        if not download_root:
-            download_root = str((MODELS_DIR / "huggingface" / "hub").resolve())
-        engine = ASREngine(
-            model_size=config["model_size"],
-            device=parsed_device,
-            device_index=device_index,
-            compute_type=compute_type,
-            language=language,
-            download_root=download_root,
-            pad_seconds=pad_seconds,
-        )
+            engine = Qwen3ASREngine(device=worker_device, hub=hub)
+        case "buzzasr-korean":
+            from asr_engine import ASREngine
+
+            ct2_path = get_local_model_path(engine_type)
+            if not ct2_path:
+                raise RuntimeError(
+                    "BuzzASR Korean CTranslate2 model is not cached; "
+                    "run the download step first"
+                )
+            engine = ASREngine(
+                model_size=ct2_path,
+                device=parsed_device,
+                device_index=device_index,
+                compute_type=compute_type,
+                language=language,
+                pad_seconds=pad_seconds,
+            )
+        case _:
+            from asr_engine import ASREngine
+
+            download_root = config.get("download_root")
+            if not download_root:
+                download_root = str((MODELS_DIR / "huggingface" / "hub").resolve())
+            engine = ASREngine(
+                model_size=config["model_size"],
+                device=parsed_device,
+                device_index=device_index,
+                compute_type=compute_type,
+                language=language,
+                download_root=download_root,
+                pad_seconds=pad_seconds,
+            )
 
     if hasattr(engine, "set_language"):
         engine.set_language(language)
@@ -180,7 +214,9 @@ def worker_main(conn, config: dict):
                     conn.send(_ok_response(msg_id, "result", result))
                     continue
                 if msg_type == "set_language":
-                    if hasattr(engine, "set_language"):
+                    if not config.get("language_locked") and hasattr(
+                        engine, "set_language"
+                    ):
                         engine.set_language(payload.get("language", "auto"))
                     conn.send(_ok_response(msg_id, "ack"))
                     continue
