@@ -93,8 +93,8 @@ class _LogCapture(logging.Handler):
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 
-class _StderrCapture:
-    """Captures stderr (tqdm) and forwards cleaned lines via callback."""
+class _StreamCapture:
+    """Captures stdout/stderr (tqdm) and forwards cleaned lines via callback."""
 
     def __init__(self, callback, original):
         self._cb = callback
@@ -116,7 +116,9 @@ class _StderrCapture:
             self._orig.flush()
 
     def isatty(self):
-        return False
+        # tqdm disables itself with disable=None when the stream is not a TTY.
+        # The log view can render carriage-return updates, so report a TTY.
+        return True
 
 
 class _ModelLoadDialog(QDialog):
@@ -298,7 +300,9 @@ class SetupWizardDialog(QDialog):
 
         logging.getLogger().addHandler(self._log_handler)
         self._orig_stderr = sys.stderr
-        sys.stderr = _StderrCapture(self._log_signal.emit, self._orig_stderr)
+        sys.stderr = _StreamCapture(self._log_signal.emit, self._orig_stderr)
+        self._orig_stdout = sys.stdout
+        sys.stdout = _StreamCapture(self._log_signal.emit, self._orig_stdout)
 
         self._error = None
         self._download_thread = threading.Thread(
@@ -324,6 +328,7 @@ class SetupWizardDialog(QDialog):
             return
         self._poll_timer.stop()
         sys.stderr = self._orig_stderr
+        sys.stdout = self._orig_stdout
         logging.getLogger().removeHandler(self._log_handler)
 
         if self._error:
@@ -414,7 +419,9 @@ class ModelDownloadDialog(QDialog):
     def _start_download(self):
         logging.getLogger().addHandler(self._log_handler)
         self._orig_stderr = sys.stderr
-        sys.stderr = _StderrCapture(self._log_signal.emit, self._orig_stderr)
+        sys.stderr = _StreamCapture(self._log_signal.emit, self._orig_stderr)
+        self._orig_stdout = sys.stdout
+        sys.stdout = _StreamCapture(self._log_signal.emit, self._orig_stdout)
 
         self._download_thread = threading.Thread(
             target=self._download_worker, daemon=True
@@ -462,6 +469,7 @@ class ModelDownloadDialog(QDialog):
             return
         self._poll_timer.stop()
         sys.stderr = self._orig_stderr
+        sys.stdout = self._orig_stdout
         logging.getLogger().removeHandler(self._log_handler)
 
         if self._error:
